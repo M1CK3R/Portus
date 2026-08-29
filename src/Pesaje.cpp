@@ -41,6 +41,9 @@ static bool  enMeseta = false;
 static bool  resultadoListo = false;
 static float pesoDinamicoFinal = 0;
 
+static long  ultimoCrudoA = 0;
+static long  ultimoCrudoB = 0;
+
 // Estado interno: estático (C)
 static bool  lecturaEstaticaPendiente = false;
 static bool  lecturaEstaticaLista = false;
@@ -105,7 +108,7 @@ static bool hx711_leerParSincronizado(long &valorA, long &valorB) {
   return true;
 }
 
-// Timer1 en modo CTC
+// ---------------- Timer1 (Mega) en modo CTC ----------------
 // Genera una interrupción cada INTERVALO_MUESTREO_MS.
 static void timer1_configurar(uint16_t intervaloMs) {
   noInterrupts();
@@ -196,6 +199,9 @@ void Pesaje_actualizar() {
     return; // todavía no había datos nuevos en este ciclo
   }
 
+  ultimoCrudoA = crudoA;
+  ultimoCrudoB = crudoB;
+
   float pesoA = (crudoA - offsetA) / factorCalA;
   float pesoB = (crudoB - offsetB) / factorCalB;
   float sumaActual = pesoA + pesoB;
@@ -264,3 +270,8 @@ bool Pesaje_hayLecturaEstatica() {
 float Pesaje_obtenerPesoEstatico() {
   return pesoEstaticoFinal;
 }
+
+long Pesaje_debugCrudoA() { return ultimoCrudoA; }
+long Pesaje_debugCrudoB() { return ultimoCrudoB; }
+long Pesaje_debugOffsetA() { return offsetA; }
+long Pesaje_debugOffsetB() { return offsetB; }

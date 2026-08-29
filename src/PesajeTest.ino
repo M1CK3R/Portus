@@ -9,7 +9,7 @@
 
   No depende de ningún otro módulo del equipo (garita, grúa, patio, etc.).
   Cuando ya esté calibrado y probado, este archivo NO se sube al main
-  final -> ahí solo se usan Pesaje.h / Pesaje.cpp
+  final -> ahí solo se usan Pesaje.h / Pesaje.cpp como se mostró antes.
 
   Requiere en la misma carpeta del sketch (o como librería local):
     Pesaje.h
@@ -22,7 +22,9 @@
 // 1 = solo ver lecturas crudas de A y B (para calibrar factor y tara)
 // 2 = probar la detección de meseta / pesaje dinámico completo
 // 3 = probar la lectura estática (Sensor C) bajo demanda
-#define MODO_PRUEBA 2
+// 4 = DIAGNOSTICO: imprime valores crudos de A y B en cada lectura exitosa
+//     (usa este modo primero si el peso siempre te da 0)
+#define MODO_PRUEBA 4
 
 // Factores de calibración iniciales (AJUSTAR con un peso conocido)
 float FACTOR_A = 2280.0;
@@ -71,6 +73,23 @@ void loop() {
 
     Pesaje_resetDinamico();
     Serial.println(F("Listo para el siguiente vehiculo..."));
+  }
+#endif
+
+#if MODO_PRUEBA == 4
+  // Modo 4: diagnóstico crudo. Imprime cada vez que Pesaje_actualizar()
+  // logra una lectura sincronizada nueva de A y B (aunque no haya meseta).
+  static long ultimoImpresoA = -999999;
+  static long ultimoImpresoB = -999999;
+  long crudoA = Pesaje_debugCrudoA();
+  long crudoB = Pesaje_debugCrudoB();
+  if (crudoA != ultimoImpresoA || crudoB != ultimoImpresoB) {
+    ultimoImpresoA = crudoA;
+    ultimoImpresoB = crudoB;
+    Serial.print(F("crudoA=")); Serial.print(crudoA);
+    Serial.print(F(" (offsetA=")); Serial.print(Pesaje_debugOffsetA()); Serial.print(F(")"));
+    Serial.print(F("  |  crudoB=")); Serial.print(crudoB);
+    Serial.print(F(" (offsetB=")); Serial.print(Pesaje_debugOffsetB()); Serial.println(F(")"));
   }
 #endif
 

@@ -1,7 +1,7 @@
 /*
   Pesaje.h
   Módulo de pesaje dinámico (Base 1: Sensor A + Sensor B) y
-  pesaje estático (Base 2: Sensor C)
+  pesaje estático (Base 2: Sensor C) para PORTUS - Fase 1.
 
   Uso desde main.ino:
 
@@ -71,6 +71,15 @@ bool Pesaje_hayLecturaEstatica();
 
 // Último peso estático calculado, en gramos.
 float Pesaje_obtenerPesoEstatico();
+
+// Diagnóstico
+// Últimos valores crudos leídos de A y B (cuentas HX711, sin tara/factor).
+// Útiles para verificar en el Monitor Serial si los sensores realmente
+// están cambiando cuando pones/quitas peso.
+long Pesaje_debugCrudoA();
+long Pesaje_debugCrudoB();
+long Pesaje_debugOffsetA();
+long Pesaje_debugOffsetB();
 
 // Calibración
 // Ajusta el factor de escala (cuentas HX711 -> gramos) de cada celda.
