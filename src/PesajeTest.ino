@@ -32,14 +32,14 @@
 #define MODO_PRUEBA 5
 
 // Factores de calibración iniciales (AJUSTAR con un peso conocido)
-float FACTOR_A = 2280.0;
-float FACTOR_B = 2280.0;
+float FACTOR_A = 364.0;
+float FACTOR_B = 352.7;
 float FACTOR_C = 2280.0;
 
 unsigned long ultimoPrintMs = 0;
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(9600);
   while (!Serial) { ; }
 
   Serial.println(F("=== PORTUS - Prueba de modulo de Pesaje ==="));
