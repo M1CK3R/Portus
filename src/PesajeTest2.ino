@@ -27,8 +27,8 @@
 HX711 sensorC;
 
 // Calibracion
-float FACTOR_A = 363.9;   // cambia el signo si el peso te sale negativo
-float FACTOR_B = 354.5;   // cambia el signo si el peso te sale negativo
+float FACTOR_A = 570.0;   // cambia el signo si el peso te sale negativo
+float FACTOR_B = 1071.0;   // cambia el signo si el peso te sale negativo
 float FACTOR_C = 2280.0;  // pendiente de calibrar
 
 long offsetA = 0;
