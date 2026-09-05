@@ -1,6 +1,6 @@
 /*
   PesajeTest.ino
-  Sketch de prueba AISLADO para el módulo de Pesaje
+  Sketch de prueba AISLADO para el módulo de Pesaje (PORTUS - Fase 1).
 
   Sirve para:
    - Verificar que las lecturas de Sensor A, B y C llegan correctamente.
@@ -24,7 +24,12 @@
 // 3 = probar la lectura estática (Sensor C) bajo demanda
 // 4 = DIAGNOSTICO: imprime valores crudos de A y B en cada lectura exitosa
 //     (usa este modo primero si el peso siempre te da 0)
-#define MODO_PRUEBA 4
+// 5 = CALIBRACION: imprime un PROMEDIO de las ultimas N lecturas crudas,
+//     cada 1 segundo. Usa este modo para sacar el factor real:
+//       1) Deja la plataforma VACIA, anota el promedio (base_vacio).
+//       2) Pon el peso conocido, anota el nuevo promedio (base_cargado).
+//       3) factor = (base_cargado - base_vacio) / peso_en_gramos
+#define MODO_PRUEBA 5
 
 // Factores de calibración iniciales (AJUSTAR con un peso conocido)
 float FACTOR_A = 2280.0;
@@ -73,6 +78,29 @@ void loop() {
 
     Pesaje_resetDinamico();
     Serial.println(F("Listo para el siguiente vehiculo..."));
+  }
+#endif
+
+#if MODO_PRUEBA == 5
+  // Modo 5: calibración con promedio móvil (reduce el ruido para comparar)
+  static long sumaA = 0, sumaB = 0;
+  static uint16_t contador = 0;
+  sumaA += Pesaje_debugCrudoA();
+  sumaB += Pesaje_debugCrudoB();
+  contador++;
+
+  if (millis() - ultimoPrintMs >= 1000) {
+    ultimoPrintMs = millis();
+    if (contador > 0) {
+      Serial.print(F("Promedio A = "));
+      Serial.print(sumaA / (long)contador);
+      Serial.print(F("   Promedio B = "));
+      Serial.print(sumaB / (long)contador);
+      Serial.print(F("   (n=")); Serial.print(contador); Serial.println(F(" muestras))"));
+    }
+    sumaA = 0;
+    sumaB = 0;
+    contador = 0;
   }
 #endif
 

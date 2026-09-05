@@ -1,6 +1,5 @@
 /*
   Pesaje.cpp
-  Implementación del módulo de pesaje para PORTUS - Fase 1.
 
   Diseño:
   - Timer1 en modo CTC genera una interrupción periódica (por defecto
@@ -108,7 +107,7 @@ static bool hx711_leerParSincronizado(long &valorA, long &valorB) {
   return true;
 }
 
-// ---------------- Timer1 (Mega) en modo CTC ----------------
+// Timer1 (Mega) en modo CTC
 // Genera una interrupción cada INTERVALO_MUESTREO_MS.
 static void timer1_configurar(uint16_t intervaloMs) {
   noInterrupts();
