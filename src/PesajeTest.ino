@@ -31,10 +31,10 @@
 //       3) factor = (base_cargado - base_vacio) / peso_en_gramos
 #define MODO_PRUEBA 5
 
-// Factores de calibración iniciales (AJUSTAR con un peso conocido)
-float FACTOR_A = 364.0;
-float FACTOR_B = 352.7;
-float FACTOR_C = 2280.0;
+// Factores de calibración
+float FACTOR_A = 363.9;
+float FACTOR_B = 354.5;
+float FACTOR_C = 2280.0; // pendiente de calibrar con Sensor C
 
 unsigned long ultimoPrintMs = 0;
 
@@ -88,6 +88,12 @@ void loop() {
   sumaA += Pesaje_debugCrudoA();
   sumaB += Pesaje_debugCrudoB();
   contador++;
+
+  if (Pesaje_hayResultadoDinamico()) {
+    // En modo calibración no nos interesa la meseta, solo el crudo:
+    // reseteamos para que el módulo nunca deje de leer.
+    Pesaje_resetDinamico();
+  }
 
   if (millis() - ultimoPrintMs >= 1000) {
     ultimoPrintMs = millis();

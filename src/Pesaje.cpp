@@ -190,48 +190,55 @@ void Pesaje_actualizar() {
   if (!tickTimer) return;
   tickTimer = false;
 
-  // Si ya hay un resultado pendiente de ser leído por el main, no seguir acumulando
-  if (resultadoListo) return;
-
   long crudoA, crudoB;
   if (!hx711_leerParSincronizado(crudoA, crudoB)) {
     return; // todavía no había datos nuevos en este ciclo
   }
 
+  // Los valores crudos SIEMPRE se actualizan, aunque haya un resultado
+  // dinámico pendiente de ser leído por el main. Esto es lo que antes
+  // se congelaba y obligaba a resetear el Arduino para ver cambios.
   ultimoCrudoA = crudoA;
   ultimoCrudoB = crudoB;
 
-  float pesoA = (crudoA - offsetA) / factorCalA;
-  float pesoB = (crudoB - offsetB) / factorCalB;
-  float sumaActual = pesoA + pesoB;
-
-  if (indiceBuffer == 0) {
-    // primera muestra del posible nuevo vehículo
-    ultimaMuestraSuma = sumaActual;
-    muestrasEstablesSeguidas = 1;
+  // La acumulación para detectar la meseta SÍ se pausa mientras el main
+  // no confirme que ya leyó el resultado anterior (Pesaje_resetDinamico()).
+  if (resultadoListo) {
+    // no seguimos acumulando muestras nuevas para la meseta,
+    // pero el bloque de abajo (estático) igual puede ejecutarse
   } else {
-    float delta = abs(sumaActual - ultimaMuestraSuma);
-    if (delta <= DELTA_ESTABLE_GRAMOS) {
-      muestrasEstablesSeguidas++;
-    } else {
-      // el peso cambió bruscamente (vehículo entrando o saliendo de la
-      // plataforma) -> reiniciamos la ventana de estabilidad
+    float pesoA = (crudoA - offsetA) / factorCalA;
+    float pesoB = (crudoB - offsetB) / factorCalB;
+    float sumaActual = pesoA + pesoB;
+
+    if (indiceBuffer == 0) {
+      // primera muestra del posible nuevo vehículo
+      ultimaMuestraSuma = sumaActual;
       muestrasEstablesSeguidas = 1;
-      indiceBuffer = 0;
+    } else {
+      float delta = abs(sumaActual - ultimaMuestraSuma);
+      if (delta <= DELTA_ESTABLE_GRAMOS) {
+        muestrasEstablesSeguidas++;
+      } else {
+        // el peso cambió bruscamente (vehículo entrando o saliendo de la
+        // plataforma) -> reiniciamos la ventana de estabilidad
+        muestrasEstablesSeguidas = 1;
+        indiceBuffer = 0;
+      }
+      ultimaMuestraSuma = sumaActual;
     }
-    ultimaMuestraSuma = sumaActual;
-  }
 
-  if (indiceBuffer < MAX_MUESTRAS_BUFFER) {
-    bufferMuestras[indiceBuffer++] = sumaActual;
-  }
+    if (indiceBuffer < MAX_MUESTRAS_BUFFER) {
+      bufferMuestras[indiceBuffer++] = sumaActual;
+    }
 
-  if (muestrasEstablesSeguidas >= MUESTRAS_MESETA_MIN && !resultadoListo) {
-    // Tomamos las últimas MUESTRAS_MESETA_MIN muestras (la meseta real)
-    uint8_t inicio = indiceBuffer - MUESTRAS_MESETA_MIN;
-    pesoDinamicoFinal = calcularMediana(&bufferMuestras[inicio], MUESTRAS_MESETA_MIN);
-    resultadoListo = true;
-  }
+    if (muestrasEstablesSeguidas >= MUESTRAS_MESETA_MIN && !resultadoListo) {
+      // Tomamos las últimas MUESTRAS_MESETA_MIN muestras (la meseta real)
+      uint8_t inicio = indiceBuffer - MUESTRAS_MESETA_MIN;
+      pesoDinamicoFinal = calcularMediana(&bufferMuestras[inicio], MUESTRAS_MESETA_MIN);
+      resultadoListo = true;
+    }
+  } // cierra el "else" de (!resultadoListo)
 
   // Lectura estática solicitada, se atiende cuando toque este mismo tick
   if (lecturaEstaticaPendiente) {
