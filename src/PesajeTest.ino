@@ -1,151 +1,101 @@
 /*
   PesajeTest.ino
-  Sketch de prueba AISLADO para el módulo de Pesaje (PORTUS - Fase 1).
 
-  Sirve para:
-   - Verificar que las lecturas de Sensor A, B y C llegan correctamente.
-   - Calibrar factores de escala y tara con un peso conocido.
-   - Ver en el Monitor Serial cuándo se detecta la meseta y qué peso calcula.
+  Version de prueba usando la libreria NATIVA HX711.h (no el modulo
+  custom de bit-banging). Sirve para confirmar que el hardware (celdas,
+  cableado, alimentacion) responde bien, sin depender de nuestra logica
+  de sincronizacion manual.
 
-  No depende de ningún otro módulo del equipo (garita, grúa, patio, etc.).
-  Cuando ya esté calibrado y probado, este archivo NO se sube al main
-  final -> ahí solo se usan Pesaje.h / Pesaje.cpp como se mostró antes.
+  Requiere instalar la libreria "HX711" (por ejemplo la de bogde,
+  Sketch > Incluir Libreria > Administrar Bibliotecas > buscar "HX711").
 
-  Requiere en la misma carpeta del sketch (o como librería local):
-    Pesaje.h
-    Pesaje.cpp
+  IMPORTANTE: esta version NO cumple el requisito del documento de leer
+  A y B en el MISMO pulso de reloj (cada objeto HX711 lee por separado).
+  Es solo para diagnostico / calibracion. Cuando confirmemos que el
+  hardware funciona, volvemos al modulo Pesaje.h/.cpp para el pesaje
+  dinamico real.
 */
 
-#include "Pesaje.h"
+#include "HX711.h"
 
-// Modo de prueba
-// 1 = solo ver lecturas crudas de A y B (para calibrar factor y tara)
-// 2 = probar la detección de meseta / pesaje dinámico completo
-// 3 = probar la lectura estática (Sensor C) bajo demanda
-// 4 = DIAGNOSTICO: imprime valores crudos de A y B en cada lectura exitosa
-//     (usa este modo primero si el peso siempre te da 0)
-// 5 = CALIBRACION: imprime un PROMEDIO de las ultimas N lecturas crudas,
-//     cada 1 segundo. Usa este modo para sacar el factor real:
-//       1) Deja la plataforma VACIA, anota el promedio (base_vacio).
-//       2) Pon el peso conocido, anota el nuevo promedio (base_cargado).
-//       3) factor = (base_cargado - base_vacio) / peso_en_gramos
-#define MODO_PRUEBA 5
+// Base 1 - Pesaje dinamico
+#define SCK_A 2
+#define DT_A  3
+#define SCK_B 2   // mismo pin fisico de reloj que A (aunque cada objeto lo maneje por su cuenta)
+#define DT_B  4
 
-// Factores de calibración
+// Base 2 - Pesaje estatico
+#define SCK_C 5
+#define DT_C  6
+
+HX711 sensorA;
+HX711 sensorB;
+HX711 sensorC;
+
+// Factores ya calculados con la protoboard de 70g (ajusta si vuelves a calibrar)
 float FACTOR_A = 363.9;
 float FACTOR_B = 354.5;
-float FACTOR_C = 2280.0; // pendiente de calibrar con Sensor C
-
-unsigned long ultimoPrintMs = 0;
+float FACTOR_C = 2280.0; // pendiente de calibrar
 
 void setup() {
   Serial.begin(9600);
   while (!Serial) { ; }
 
-  Serial.println(F("=== PORTUS - Prueba de modulo de Pesaje ==="));
+  Serial.println(F("=== Prueba con libreria nativa HX711 ==="));
 
-  Pesaje_init();
-  Pesaje_setFactorCalibracion(FACTOR_A, FACTOR_B, FACTOR_C);
+  sensorA.begin(DT_A, SCK_A);
+  sensorB.begin(DT_B, SCK_B);
+  sensorC.begin(DT_C, SCK_C);
 
-  Serial.println(F("Coloca la plataforma dinamica VACIA y no la toques..."));
-  delay(2000);
-  Pesaje_tararDinamico();
-  Serial.println(F("Tara dinamica (A+B) lista."));
+  sensorA.set_scale(FACTOR_A);
+  sensorB.set_scale(FACTOR_B);
+  sensorC.set_scale(FACTOR_C);
 
-  Serial.println(F("Coloca la base estatica (C) VACIA y no la toques..."));
-  delay(2000);
-  Pesaje_tararEstatico();
-  Serial.println(F("Tara estatica (C) lista."));
+  Serial.println(F("Verificando conexion de cada sensor..."));
+  Serial.print(F("Sensor A listo? ")); Serial.println(sensorA.is_ready() ? F("SI") : F("NO - revisa cableado"));
+  Serial.print(F("Sensor B listo? ")); Serial.println(sensorB.is_ready() ? F("SI") : F("NO - revisa cableado"));
+  Serial.print(F("Sensor C listo? ")); Serial.println(sensorC.is_ready() ? F("SI") : F("NO - revisa cableado"));
 
-  Serial.println(F("Listo. Empezando pruebas..."));
+  Serial.println(F("Deja la plataforma y la base VACIAS, tarando en 3 segundos..."));
+  delay(3000);
+
+  sensorA.tare(5);
+  sensorB.tare(5);
+  sensorC.tare(5);
+
+  Serial.println(F("Tara lista. Empezando lecturas continuas..."));
   Serial.println();
-
-#if MODO_PRUEBA == 3
-  Pesaje_solicitarLecturaEstatica();
-#endif
 }
 
 void loop() {
-  Pesaje_actualizar();
-
-#if MODO_PRUEBA == 2
-  // Modo 2: pesaje dinámico completo
-  if (Pesaje_hayResultadoDinamico()) {
-    float peso = Pesaje_obtenerPesoDinamico();
-    Serial.print(F(">> MESETA DETECTADA. Peso dinamico (A+B): "));
-    Serial.print(peso, 1);
-    Serial.println(F(" g"));
-
-    Pesaje_resetDinamico();
-    Serial.println(F("Listo para el siguiente vehiculo..."));
-  }
-#endif
-
-#if MODO_PRUEBA == 5
-  // Modo 5: calibración con promedio móvil (reduce el ruido para comparar)
-  static long sumaA = 0, sumaB = 0;
-  static uint16_t contador = 0;
-  sumaA += Pesaje_debugCrudoA();
-  sumaB += Pesaje_debugCrudoB();
-  contador++;
-
-  if (Pesaje_hayResultadoDinamico()) {
-    // En modo calibración no nos interesa la meseta, solo el crudo:
-    // reseteamos para que el módulo nunca deje de leer.
-    Pesaje_resetDinamico();
+  Serial.print(F("A="));
+  if (sensorA.is_ready()) {
+    Serial.print(sensorA.get_units(1), 1);
+  } else {
+    Serial.print(F("NO_LISTO"));
   }
 
-  if (millis() - ultimoPrintMs >= 1000) {
-    ultimoPrintMs = millis();
-    if (contador > 0) {
-      Serial.print(F("Promedio A = "));
-      Serial.print(sumaA / (long)contador);
-      Serial.print(F("   Promedio B = "));
-      Serial.print(sumaB / (long)contador);
-      Serial.print(F("   (n=")); Serial.print(contador); Serial.println(F(" muestras))"));
-    }
-    sumaA = 0;
-    sumaB = 0;
-    contador = 0;
+  Serial.print(F(" g   B="));
+  if (sensorB.is_ready()) {
+    Serial.print(sensorB.get_units(1), 1);
+  } else {
+    Serial.print(F("NO_LISTO"));
   }
-#endif
 
-#if MODO_PRUEBA == 4
-  // Modo 4: diagnóstico crudo. Imprime cada vez que Pesaje_actualizar()
-  // logra una lectura sincronizada nueva de A y B (aunque no haya meseta).
-  static long ultimoImpresoA = -999999;
-  static long ultimoImpresoB = -999999;
-  long crudoA = Pesaje_debugCrudoA();
-  long crudoB = Pesaje_debugCrudoB();
-  if (crudoA != ultimoImpresoA || crudoB != ultimoImpresoB) {
-    ultimoImpresoA = crudoA;
-    ultimoImpresoB = crudoB;
-    Serial.print(F("crudoA=")); Serial.print(crudoA);
-    Serial.print(F(" (offsetA=")); Serial.print(Pesaje_debugOffsetA()); Serial.print(F(")"));
-    Serial.print(F("  |  crudoB=")); Serial.print(crudoB);
-    Serial.print(F(" (offsetB=")); Serial.print(Pesaje_debugOffsetB()); Serial.println(F(")"));
+  Serial.print(F(" g   A+B="));
+  if (sensorA.is_ready() && sensorB.is_ready()) {
+    Serial.print(sensorA.get_units(1) + sensorB.get_units(1), 1);
+  } else {
+    Serial.print(F("--"));
   }
-#endif
 
-#if MODO_PRUEBA == 3
-  // Modo 3: pesaje estático puntual
-  if (Pesaje_hayLecturaEstatica()) {
-    float pesoC = Pesaje_obtenerPesoEstatico();
-    Serial.print(F(">> Lectura estatica (C): "));
-    Serial.print(pesoC, 1);
-    Serial.println(F(" g"));
-
-    delay(2000); // espera antes de pedir otra lectura
-    Pesaje_solicitarLecturaEstatica();
+  Serial.print(F(" g   C="));
+  if (sensorC.is_ready()) {
+    Serial.print(sensorC.get_units(1), 1);
+  } else {
+    Serial.print(F("NO_LISTO"));
   }
-#endif
+  Serial.println(F(" g"));
 
-  // Reporte periódico simple (util en modo 1 para ver que los sensores respondan)
-  if (millis() - ultimoPrintMs >= 500) {
-    ultimoPrintMs = millis();
-#if MODO_PRUEBA == 1
-    Serial.print(F("Esperando ciclos del timer... (deberias ver el peso cambiar al poner algo encima)"));
-    Serial.println();
-#endif
-  }
+  delay(300); // solo para que el Monitor Serial sea legible; no afecta al sensor
 }
