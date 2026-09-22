@@ -1,0 +1,68 @@
+{
+  "descripcion": "Constantes compartidas del protocolo serial PORTUS. Fuente de paridad firmware-puente (CODESTYLE P-2). El firmware de la Etapa 2 debe coincidir con este archivo y el puente lo verifica en pruebas.",
+  "prefijo_topicos": "portus",
+  "crc": {
+    "nombre": "CRC-16/CCITT-FALSE",
+    "polinomio": "0x1021",
+    "valor_inicial": "0xFFFF",
+    "reflexion_entrada": false,
+    "reflexion_salida": false,
+    "xor_salida": "0x0000",
+    "vector_estandar": { "datos": "123456789", "crc_hex": "29B1" }
+  },
+  "trama": {
+    "formato": "^SEQ|TIPO|CAMPOS#CRC\\n",
+    "caracteres_reservados": ["^", "|", "#", ",", "\n", "\r", "%"],
+    "escape": "%HH",
+    "longitud_maxima_bytes": 256,
+    "baudios_sugeridos": 115200
+  },
+  "tipos_trama": {
+    "eventos_controlador": ["GAR", "PES", "AGU", "TRF", "GRU", "PAT", "SAL", "ALM", "EST"],
+    "respuesta_controlador": ["RSP"],
+    "mensajes_servidor": ["CMD", "AUT", "JOB", "PING", "SYN"],
+    "nota": "El SPECS §4.2 dice 'código de 3 letras' pero define PING con 4; se aceptan 3 a 4 letras."
+  },
+  "comandos": [
+    "AbrirTalanquera",
+    "CerrarTalanquera",
+    "AbrirPuertaSalida",
+    "AgujaRecta",
+    "AgujaParqueo",
+    "AgujaLiberar",
+    "GruaReferenciar",
+    "GruaSuspender",
+    "GruaReanudar",
+    "PosicionBloquear",
+    "PosicionLiberar",
+    "ModoMantenimiento",
+    "AlarmaSilenciar"
+  ],
+  "causas_rechazo_comando": [
+    "VEH_BAJO_TALANQUERA",
+    "VEH_BAJO_PUERTA",
+    "VEH_SOBRE_AGUJA",
+    "PARQUEO_VACIO",
+    "GRUA_CON_CARGA",
+    "GRUA_EN_TRABAJO",
+    "GRUA_EN_FALLA",
+    "POS_EN_TRABAJO",
+    "INCONSISTENCIA_PERSISTE",
+    "VEH_EN_TRANSFERENCIA",
+    "SIN_RESPUESTA"
+  ],
+  "estados_respuesta": ["ACK", "NAK"],
+  "severidades_alarma": ["CRITICA", "ALTA", "MEDIA", "BAJA"],
+  "topicos": {
+    "evt": ["garita", "pesaje", "aguja", "transferencia", "grua", "patio", "salida", "alarma", "estado"],
+    "cmd": ["solicitud", "respuesta"],
+    "srv": ["turno", "retencion", "alarma", "cita", "enlace"]
+  },
+  "qos": { "eventos": 1, "latido": 0, "comandos": 1 },
+  "tiempos": {
+    "periodo_latido_s": 5,
+    "periodos_sin_latido": 3,
+    "tiempo_limite_comando_s": 2,
+    "periodo_ping_s": 3
+  }
+}
