@@ -1,0 +1,56 @@
+[project]
+name = "portus-puente"
+version = "0.1.0"
+description = "PORTUS Fase 2 - puente serial <-> MQTT del lado del servidor"
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["."]
+
+[tool.ruff.lint]
+# N818: los nombres de excepción van en español con prefijo Error (CODESTYLE D-5:
+# ErrorProtocolo, PermisoDenegado, ErrorValidacion), no con sufijo inglés.
+select = ["E", "F", "W", "I", "B", "UP", "N", "S", "T20", "C90", "RUF"]
+ignore = ["N818"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.per-file-ignores]
+"pruebas/**" = ["S101"]
+# Las herramientas de línea de comandos escriben su salida a stdout por diseño.
+"herramientas/**" = ["T201"]
+# Los f-string SQL de los repositorios interpolan SOLO constantes de módulo con
+# nombres de columna (BD-1 exige siempre parámetros para los valores, y se
+# cumple); la regla S608 no distingue constantes de entrada del usuario.
+"web/repositorios/**" = ["S608"]
+# El servicio web debe ser accesible desde la red local (SPECS §19.1), por eso
+# waitress enlaza con todas las interfaces del SBC.
+"web/__main__.py" = ["S104"]
+
+[tool.mypy]
+strict = true
+python_version = "3.11"
+# herramientas/ no es un paquete: se indica la base para resolver sus importaciones.
+mypy_path = "."
+explicit_package_bases = true
+
+[[tool.mypy.overrides]]
+module = "serial"
+ignore_missing_imports = true
+
+# waitress no publica pistas de tipos; la frontera con ella es solo __main__.
+[[tool.mypy.overrides]]
+module = "waitress.*"
+ignore_missing_imports = true
+
+# El código de producción (puente, herramientas) se verifica con --strict; las
+# pruebas usan fixtures de pytest y argumentos dinámicos, así que se excluyen.
+[[tool.mypy.overrides]]
+module = "pruebas.*"
+ignore_errors = true
+
+[tool.pytest.ini_options]
+testpaths = ["pruebas"]

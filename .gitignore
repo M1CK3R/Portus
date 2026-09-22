@@ -1,0 +1,23 @@
+# Secretos y datos locales (G-6)
+config/portus.env
+*.db
+*.sqlite3
+
+# Artefactos de compilacion y entornos
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+dist/
+build/
+
+# Cachés de herramientas
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+
+# Editor y sistema
+.vscode/
+.idea/
+.DS_Store
