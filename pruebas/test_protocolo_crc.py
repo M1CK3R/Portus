@@ -1,103 +1,54 @@
-"""Utilidades compartidas de prueba: relojes falsos y duplicados de frontera (T-3)."""
+"""Pruebas del CRC y de los ejemplos literales del SPECS §4.2 (CODESTYLE T-4)."""
 
-import json
-from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
-from typing import Protocol
+import pytest
 
-INSTANTE_FIJO = datetime(2026, 9, 20, 14, 3, 22, 418000, tzinfo=UTC)
-MARCA_TIEMPO_FIJA = "2026-09-20T14:03:22.418Z"
+from puente.protocolo import (
+    MAX_LONGITUD_TRAMA_BYTES,
+    MIN_LONGITUD_TRAMA_BYTES,
+    Trama,
+    calcular_crc16,
+    parsear_linea,
+)
 
+VECTOR_ESTANDAR = b"123456789"
+VECTOR_ESPERADO = 0x29B1
 
-class RelojFalso:
-    """Reloj monotónico inyectable para pruebas deterministas (CODESTYLE T-3)."""
-
-    def __init__(self, inicial_ms: int = 0) -> None:
-        self._ahora_ms = inicial_ms
-
-    def __call__(self) -> int:
-        return self._ahora_ms
-
-    def avanzar(self, ms: int) -> None:
-        self._ahora_ms += ms
-
-
-class RelojUtcFalso:
-    """Reloj de pared UTC inyectable que avanza sincronizado con el monotónico."""
-
-    def __init__(self, instante_inicial: datetime = INSTANTE_FIJO) -> None:
-        self._ahora = instante_inicial
-
-    def __call__(self) -> datetime:
-        return self._ahora
-
-    def avanzar_ms(self, ms: int) -> None:
-        self._ahora = self._ahora + timedelta(milliseconds=ms)
+EJEMPLOS_SPECS = [
+    "^1042|PES|veh=V02,g=38500,n=12,meseta=1#58B2\n",
+    "^2210|EST|modo=NORMAL,grua=REPOSO,link=1#A60E\n",
+    "^57|CMD|nombre=AbrirTalanquera#9F98\n",
+    "^57|RSP|estado=ACK#C4D8\n",
+    "^58|RSP|estado=NAK,causa=VEH_BAJO_TALANQUERA#3B92\n",
+]
 
 
-@dataclass(frozen=True)
-class Publicacion:
-    """Una publicación capturada hacia el broker."""
-
-    topico: str
-    datos: str
-    qos: int
-    retain: bool
-
-    def json(self) -> dict[str, object]:
-        return json.loads(self.datos)
+def test_vector_estandar_del_crc_da_29b1():
+    assert calcular_crc16(VECTOR_ESTANDAR) == VECTOR_ESPERADO
 
 
-@dataclass
-class SalidaFalsa:
-    """SalidaMqtt de prueba que captura todas las publicaciones."""
-
-    publicaciones: list[Publicacion] = field(default_factory=list)
-
-    def publicar(self, topico: str, datos: str, qos: int, retain: bool) -> None:
-        self.publicaciones.append(Publicacion(topico=topico, datos=datos, qos=qos, retain=retain))
-
-    def json(self, indice: int = -1) -> dict[str, object]:
-        return self.publicaciones[indice].json()
-
-    def topicos(self) -> list[str]:
-        return [publicacion.topico for publicacion in self.publicaciones]
+@pytest.mark.parametrize("linea", EJEMPLOS_SPECS)
+def test_ejemplos_de_trama_del_specs_se_parsean_con_crc_valido(linea):
+    trama = parsear_linea(linea)
+    assert trama.armar_linea() == linea
 
 
-class PuertoSerieFalso:
-    """PuertoSerie de prueba: recibe tramas inyectadas y captura las escritas."""
-
-    def __init__(self) -> None:
-        self.recibidos: list[bytes] = []
-        self.pendientes = bytearray()
-        self.abierto = False
-
-    def abrir(self) -> None:
-        self.abierto = True
-
-    def cerrar(self) -> None:
-        self.abierto = False
-
-    @property
-    def esta_abierto(self) -> bool:
-        return self.abierto
-
-    def leer_disponible(self) -> bytes:
-        datos = bytes(self.pendientes)
-        self.pendientes.clear()
-        return datos
-
-    def escribir(self, datos: bytes) -> None:
-        self.recibidos.append(bytes(datos))
-
-    def inyectar(self, datos: bytes) -> None:
-        self.pendientes.extend(datos)
-
-    def recibido(self) -> bytes:
-        return b"".join(self.recibidos)
+def test_trama_pesaje_se_serializa_igual_que_el_specs():
+    trama = Trama(
+        seq=1042, tipo="PES", campos={"veh": "V02", "g": "38500", "n": "12", "meseta": "1"}
+    )
+    assert trama.armar_linea() == EJEMPLOS_SPECS[0]
 
 
-class FechaFabrica(Protocol):
-    """Fábrica de instantes UTC determinista."""
+def test_trama_comando_se_serializa_igual_que_el_specs():
+    trama = Trama(seq=57, tipo="CMD", campos={"nombre": "AbrirTalanquera"})
+    assert trama.armar_linea() == EJEMPLOS_SPECS[2]
 
-    def __call__(self) -> datetime: ...
+
+def test_trama_nak_con_causa_se_serializa_igual_que_el_specs():
+    trama = Trama(seq=58, tipo="RSP", campos={"estado": "NAK", "causa": "VEH_BAJO_TALANQUERA"})
+    assert trama.armar_linea() == EJEMPLOS_SPECS[4]
+
+
+def test_limites_de_longitud_de_trama_estan_definidos():
+    assert MIN_LONGITUD_TRAMA_BYTES == 13
+    assert MAX_LONGITUD_TRAMA_BYTES == 256

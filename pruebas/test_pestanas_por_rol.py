@@ -1,52 +1,82 @@
-"""Pruebas de la configuración web: valores por omisión y lectura del .env (A-7)."""
+"""Pruebas de pestañas por rol: §7.6 — cantidad y nombres exactos, solo los del rol."""
 
 import pytest
 
-from web.configuracion.configuracion_web import (
-    WEB_CLAVE_SECRETA_POR_OMISION,
-    WEB_EXPIRACION_INACTIVIDAD_MIN_POR_OMISION,
-    WEB_PUERTO_POR_OMISION,
-    ConfiguracionWeb,
-)
+from pruebas.utilidades_web import crear_usuario, crear_web, entrar
+from web.modelos.pestanas import PESTANAS_POR_ROL
+from web.modelos.usuario import Rol
+
+CONTRASENA = "clave-pestanas-123"
+
+USUARIOS_POR_ROL = {
+    Rol.TERMINAL: "terminal01",
+    Rol.NAVIERA: "naviera01",
+    Rol.AGENTE: "agente01",
+    Rol.AUTORIDAD: "autoridad01",
+}
 
 
-def test_por_omision_son_los_valores_documentados_en_el_env_ejemplo():
-    configuracion = ConfiguracionWeb.por_omision()
-    assert configuracion.puerto_web == WEB_PUERTO_POR_OMISION
-    assert configuracion.expiracion_inactividad_min == WEB_EXPIRACION_INACTIVIDAD_MIN_POR_OMISION
-    assert configuracion.expiracion_inactividad_s == 30 * 60
-    assert configuracion.vida_maxima_sesion_s == 12 * 3600
+@pytest.fixture()
+def web(tmp_path):
+    web_prueba = crear_web(tmp_path)
+    for rol, username in USUARIOS_POR_ROL.items():
+        crear_usuario(web_prueba, username, rol, CONTRASENA)
+    yield web_prueba
+    web_prueba.bd.cerrar()
 
 
-def test_desde_env_lee_las_claves_web_y_conserva_el_resto():
-    texto = (
-        "# comentario\n"
-        "WEB_PUERTO=9000\n"
-        "WEB_CLAVE_SECRETA=una-clave-real\n"
-        "WEB_EXPIRACION_INACTIVIDAD_MIN=15\n"
-        "WEB_VIDA_MAXIMA_SESION_H=6\n"
-        "NIVEL_REGISTRO=DEBUG\n"
-    )
-    configuracion = ConfiguracionWeb.desde_env(texto)
-    assert configuracion.puerto_web == 9000
-    assert configuracion.clave_secreta == "una-clave-real"
-    assert configuracion.expiracion_inactividad_min == 15
-    assert configuracion.vida_maxima_sesion_h == 6
-    assert configuracion.nivel_registro == "DEBUG"
+@pytest.mark.parametrize("rol", list(USUARIOS_POR_ROL))
+def test_cada_rol_ve_sus_pestanas_con_los_nombres_exactos_del_specs(web, rol):
+    cliente = web.app.test_client()
+    entrar(cliente, USUARIOS_POR_ROL[rol], CONTRASENA)
+    for pestana in PESTANAS_POR_ROL[rol]:
+        respuesta = cliente.get(f"/pestanas/{pestana.slug}")
+        assert respuesta.status_code == 200, pestana
+        assert pestana.titulo.encode() in respuesta.data
+        # §7.3.3: usuario y rol visibles de forma permanente en la interfaz.
+        assert rol.value.encode() in respuesta.data
 
 
-def test_sin_claves_web_se_usan_los_valores_por_omision():
-    configuracion = ConfiguracionWeb.desde_env("PUERTO_SERIE=/dev/ttyUSB0\n")
-    assert configuracion.puerto_web == WEB_PUERTO_POR_OMISION
-    assert configuracion.clave_secreta == WEB_CLAVE_SECRETA_POR_OMISION
-    assert configuracion.clave_de_desarrollo is True
+def test_terminal_ve_las_ocho_pestanas_y_navega_por_su_primera(web):
+    cliente = web.app.test_client()
+    entrar(cliente, "terminal01", CONTRASENA)
+    inicio = cliente.get("/")
+    assert inicio.status_code == 302
+    assert inicio.headers["Location"].endswith("/pestanas/operacion")
+    for titulo in (
+        "Operación",
+        "Turnos",
+        "Retenciones",
+        "Patio",
+        "Grúa",
+        "Alarmas",
+        "Citas",
+        "Reportes",
+    ):
+        assert titulo.encode() in cliente.get("/pestanas/operacion").data
 
 
-def test_clave_real_no_se_marca_como_de_desarrollo():
-    configuracion = ConfiguracionWeb.desde_env("WEB_CLAVE_SECRETA=clavedelsbc\n")
-    assert configuracion.clave_de_desarrollo is False
+def test_naviera_ve_dos_pestanas_y_no_recibe_operacion_de_terminal(web):
+    cliente = web.app.test_client()
+    entrar(cliente, "naviera01", CONTRASENA)
+    respuesta = cliente.get("/pestanas/manifiestos")
+    assert respuesta.status_code == 200
+    assert b"Manifiestos" in respuesta.data
+    assert b"Operaci" not in respuesta.data  # la pestaña de TERMINAL no se renderiza
+    assert cliente.get("/pestanas/operacion").status_code == 404  # ni se sirve (§7.6)
 
 
-def test_un_valor_no_numerico_falla_con_mensaje_explicito():
-    with pytest.raises(ValueError, match="WEB_PUERTO"):
-        ConfiguracionWeb.desde_env("WEB_PUERTO=http\n")
+def test_autoridad_ve_tres_pestanas_aduaneras(web):
+    cliente = web.app.test_client()
+    entrar(cliente, "autoridad01", CONTRASENA)
+    assert cliente.get("/pestanas/solicitudes_levante").status_code == 200
+    assert cliente.get("/pestanas/retenciones_aduaneras").status_code == 200
+    assert cliente.get("/pestanas/consulta_carga").status_code == 200
+
+
+def test_la_cantidad_de_pestanas_por_rol_es_la_del_specs(web):
+    assert len(PESTANAS_POR_ROL[Rol.TERMINAL]) == 8
+    assert len(PESTANAS_POR_ROL[Rol.NAVIERA]) == 2
+    assert len(PESTANAS_POR_ROL[Rol.AGENTE]) == 2
+    assert len(PESTANAS_POR_ROL[Rol.AUTORIDAD]) == 3
+    assert len(PESTANAS_POR_ROL[Rol.TRANSPORTISTA]) == 0  # sin interfaz web (§7.6)

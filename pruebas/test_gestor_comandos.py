@@ -1,129 +1,118 @@
-"""Pruebas del publicador de eventos: envoltorio único, QoS, retain y LWT (§5.2, §5.5)."""
+"""Pruebas del flujo de comandos §6.4 y §4.5: correlación, timeout 2 s e idempotencia."""
 
-from pruebas.utilidades_pruebas import SalidaFalsa
-from puente.gestor_comandos import RespuestaComando
-from puente.mensajes_mqtt import (
-    TIPO_EVENTO_ALARMA_SERVIDOR,
-    TOPICO_CMD_RESPUESTA,
-    TOPICO_EVT_ESTADO,
-    TOPICO_SRV_ALARMA,
-    TOPICO_SRV_ENLACE,
+from pruebas.utilidades_pruebas import RelojFalso
+from puente.gestor_comandos import (
+    GestorComandos,
+    SolicitudComando,
 )
-from puente.protocolo import TIPO_EST, TIPO_GAR, TIPO_PES, Trama
-from puente.publicador_eventos import PublicadorEventos
-from puente.secuencia import ClaseSecuencia, EventoSecuencia
-from puente.vigilante_latido import EstadoEnlace, datos_al01
+from puente.protocolo import (
+    CAUSA_COMANDO_DESCONOCIDO,
+    CAUSA_SIN_RESPUESTA,
+    ESTADO_ACK,
+    ESTADO_NAK,
+    ContadorSecuenciaServidor,
+)
+from puente.secuencia import EmisorTramasServidor
+
+CMD_ID = "b7f3c2e0-5a1d-4c8e-9f21-3d6e8a90c411"
 
 
-def _publicador() -> tuple[PublicadorEventos, SalidaFalsa]:
-    salida = SalidaFalsa()
-    return PublicadorEventos(salida), salida
+def _gestor_con_reloj(reloj: RelojFalso) -> GestorComandos:
+    emisor = EmisorTramasServidor(ContadorSecuenciaServidor(seq_inicial=0))
+    return GestorComandos(emisor, tiempo_limite_s=2.0, reloj_ms=reloj)
 
 
-def test_envoltorio_del_latido_lleva_qos_cero_retain_y_campos_obligatorios():
-    publicador, salida = _publicador()
-    latido = Trama(
-        seq=2210, tipo=TIPO_EST, campos={"modo": "NORMAL", "grua": "REPOSO", "link": "1"}
-    )
-    publicador.publicar_evento_controlador(latido)
-    publicacion = salida.publicaciones[0]
-    assert publicacion.topico == TOPICO_EVT_ESTADO
-    assert publicacion.qos == 0
-    assert publicacion.retain is True
-    mensaje = publicacion.json()
-    assert set(mensaje) == {"id", "ts", "origen", "tipo", "seq", "datos"}
-    assert mensaje["origen"] == "controlador"
-    assert mensaje["seq"] == 2210
-    assert mensaje["datos"]["enlace"] is True
+def _solicitud(nombre: str = "AbrirTalanquera", cmd_id: str = CMD_ID) -> SolicitudComando:
+    return SolicitudComando(cmd_id=cmd_id, nombre=nombre, parametros={}, usuario="terminal")
 
 
-def test_evento_de_garita_lleva_qos_uno_sin_retain():
-    publicador, salida = _publicador()
-    publicador.publicar_evento_controlador(Trama(seq=9, tipo=TIPO_GAR, campos={"veh": "V01"}))
-    publicacion = salida.publicaciones[0]
-    assert publicacion.qos == 1
-    assert publicacion.retain is False
+def test_comando_valido_genera_trama_cmd_y_registra_espera():
+    reloj = RelojFalso(inicial_ms=10_000)
+    gestor = _gestor_con_reloj(reloj)
+    despacho = gestor.enviar_solicitud(_solicitud())
+    assert despacho.trama_enviada is not None
+    assert despacho.trama_enviada.seq == 1
+    assert "nombre=AbrirTalanquera" in despacho.trama_enviada.armar_linea()
 
 
-def test_identificador_de_evento_es_determinista_por_seq_y_tipo():
-    publicador, salida = _publicador()
-    trama = Trama(
-        seq=1042, tipo=TIPO_PES, campos={"veh": "V02", "g": "100", "n": "1", "meseta": "1"}
-    )
-    publicador.publicar_evento_controlador(trama)
-    publicador.publicar_evento_controlador(trama)
-    assert salida.publicaciones[0].json()["id"] == salida.publicaciones[1].json()["id"]
+def test_respuesta_ack_resuelve_el_comando_sin_nak_sintetico():
+    reloj = RelojFalso(inicial_ms=10_000)
+    gestor = _gestor_con_reloj(reloj)
+    despacho = gestor.enviar_solicitud(_solicitud())
+    assert despacho.trama_enviada is not None
+    reloj.avanzar(500)
+    respuesta = gestor.resolver_respuesta(despacho.trama_enviada.seq, ESTADO_ACK, None)
+    assert respuesta is not None
+    assert respuesta.estado == ESTADO_ACK
+    assert respuesta.sintetica is False
+    assert respuesta.tardia is False
+    assert gestor.expirar_esperas() == []
 
 
-def test_respuesta_real_del_controlador_publica_cmd_respuesta():
-    publicador, salida = _publicador()
-    respuesta = RespuestaComando(
-        cmd_id="abc",
-        nombre="AbrirTalanquera",
-        seq=57,
-        estado="ACK",
-        causa=None,
-        sintetica=False,
-        tardia=False,
-    )
-    publicador.publicar_respuesta_comando(respuesta)
-    publicacion = salida.publicaciones[0]
-    assert publicacion.topico == TOPICO_CMD_RESPUESTA
-    assert publicacion.json()["datos"]["cmd_id"] == "abc"
-    assert publicacion.json()["datos"]["estado"] == "ACK"
-    assert publicacion.json()["datos"]["sintetica"] is False
+def test_comando_sin_respuesta_vence_a_los_dos_segundos_una_sola_vez():
+    reloj = RelojFalso(inicial_ms=10_000)
+    gestor = _gestor_con_reloj(reloj)
+    despacho = gestor.enviar_solicitud(_solicitud())
+    assert despacho.trama_enviada is not None
+    reloj.avanzar(1999)
+    assert gestor.expirar_esperas() == []
+    reloj.avanzar(1)
+    sinteticas = gestor.expirar_esperas()
+    assert len(sinteticas) == 1
+    sintetica = sinteticas[0]
+    assert sintetica.estado == ESTADO_NAK
+    assert sintetica.causa == CAUSA_SIN_RESPUESTA
+    assert sintetica.cmd_id == CMD_ID
+    assert sintetica.sintetica is True
+    assert gestor.expirar_esperas() == []
 
 
-def test_nak_sintetico_lleva_origen_puente_y_causa():
-    publicador, salida = _publicador()
-    respuesta = RespuestaComando(
-        cmd_id="abc",
-        nombre="AbrirTalanquera",
-        seq=57,
-        estado="NAK",
-        causa="SIN_RESPUESTA",
-        sintetica=True,
-        tardia=False,
-    )
-    publicador.publicar_respuesta_comando(respuesta)
-    mensaje = salida.publicaciones[0].json()
-    assert mensaje["origen"] == "puente"
-    assert mensaje["datos"]["causa"] == "SIN_RESPUESTA"
+def test_respuesta_tardia_tras_nak_sintetico_se_marca_como_tardia():
+    reloj = RelojFalso(inicial_ms=10_000)
+    gestor = _gestor_con_reloj(reloj)
+    despacho = gestor.enviar_solicitud(_solicitud())
+    assert despacho.trama_enviada is not None
+    reloj.avanzar(2_500)
+    assert len(gestor.expirar_esperas()) == 1
+    tardia = gestor.resolver_respuesta(despacho.trama_enviada.seq, ESTADO_ACK, None)
+    assert tardia is not None
+    assert tardia.tardia is True
+    assert tardia.estado == ESTADO_ACK
 
 
-def test_salto_de_secuencia_se_publica_en_srv_enlace():
-    publicador, salida = _publicador()
-    evento = EventoSecuencia(clase=ClaseSecuencia.SALTO, seq=1045, seq_previa=1042, faltantes=2)
-    publicador.publicar_salto_secuencia(evento)
-    publicacion = salida.publicaciones[0]
-    assert publicacion.topico == TOPICO_SRV_ENLACE
-    assert publicacion.json()["tipo"] == "enlace.salto_secuencia"
-    assert publicacion.json()["datos"]["faltantes"] == 2
+def test_duplicado_en_vuelo_no_reenvia_ni_duplica_espera():
+    reloj = RelojFalso(inicial_ms=10_000)
+    gestor = _gestor_con_reloj(reloj)
+    primero = gestor.enviar_solicitud(_solicitud())
+    duplicado = gestor.enviar_solicitud(_solicitud())
+    assert primero.trama_enviada is not None
+    assert duplicado.trama_enviada is None
+    assert duplicado.respuesta_inmediata is None
 
 
-def test_alarma_al01_publica_en_srv_alarma_con_origen_servidor():
-    publicador, salida = _publicador()
-    publicador.publicar_alarma_enlace(datos_al01(16_000))
-    publicacion = salida.publicaciones[0]
-    assert publicacion.topico == TOPICO_SRV_ALARMA
-    mensaje = publicacion.json()
-    assert mensaje["origen"] == "servidor"
-    assert mensaje["tipo"] == TIPO_EVENTO_ALARMA_SERVIDOR
-    assert mensaje["datos"]["codigo"] == "AL01"
+def test_reintento_del_mismo_cmd_id_reutiliza_la_misma_seq():
+    reloj = RelojFalso(inicial_ms=10_000)
+    gestor = _gestor_con_reloj(reloj)
+    primero = gestor.enviar_solicitud(_solicitud())
+    assert primero.trama_enviada is not None
+    reloj.avanzar(2_500)
+    gestor.expirar_esperas()
+    reintento = gestor.enviar_solicitud(_solicitud())
+    assert reintento.trama_enviada is not None
+    assert reintento.trama_enviada.seq == primero.trama_enviada.seq
 
 
-def test_estado_de_enlace_publica_con_retain_en_srv_enlace():
-    publicador, salida = _publicador()
-    publicador.publicar_estado_enlace(
-        EstadoEnlace.ACTIVO, "2026-09-20T14:03:22.418Z", {"tramas_validas": 3}
-    )
-    publicacion = salida.publicaciones[0]
-    assert publicacion.topico == TOPICO_SRV_ENLACE
-    assert publicacion.retain is True
-    assert publicacion.json()["datos"]["puente"] == "activo"
+def test_comando_desconocido_genera_nak_inmediato_sin_trama_serial():
+    reloj = RelojFalso(inicial_ms=10_000)
+    gestor = _gestor_con_reloj(reloj)
+    despacho = gestor.enviar_solicitud(_solicitud(nombre="EncenderLuces"))
+    assert despacho.trama_enviada is None
+    assert despacho.respuesta_inmediata is not None
+    assert despacho.respuesta_inmediata.causa == CAUSA_COMANDO_DESCONOCIDO
+    assert despacho.respuesta_inmediata.estado == ESTADO_NAK
 
 
-def test_ultimo_testamento_declara_puente_caido():
-    publicador, _ = _publicador()
-    payload = publicador.armar_ultimo_testamento()
-    assert '"puente":"caido"' in payload
+def test_rsp_sin_comando_pendiente_no_genera_respuesta():
+    reloj = RelojFalso(inicial_ms=10_000)
+    gestor = _gestor_con_reloj(reloj)
+    assert gestor.resolver_respuesta(999, ESTADO_ACK, None) is None

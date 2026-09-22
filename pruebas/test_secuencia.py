@@ -1,106 +1,72 @@
-"""Prueba P10: la matriz de permisos se aplica en el servidor en cada endpoint (§7.4, §7.5).
-
-Se llama a la API directamente con cada rol, sin usar la UI: los permitidos
-pasan y cualquier otro recibe 403 con mensaje explícito, y cada rechazo
-queda en la auditoría (§7.5.5).
-"""
+"""Pruebas del rastreador de secuencia del controlador y del emisor del servidor."""
 
 import pytest
 
-from pruebas.utilidades_web import crear_usuario, crear_web, entrar
-from web.modelos.usuario import Rol
-
-CONTRASENA = "clave-matriz-123"
-
-ROLES_WEB = [Rol.TERMINAL, Rol.NAVIERA, Rol.AGENTE, Rol.AUTORIDAD]
-
-
-@pytest.fixture()
-def web(tmp_path):
-    web_prueba = crear_web(tmp_path)
-    usuarios = [
-        ("terminal01", Rol.TERMINAL),
-        ("naviera01", Rol.NAVIERA),
-        ("agente01", Rol.AGENTE),
-        ("autoridad01", Rol.AUTORIDAD),
-        ("transportista01", Rol.TRANSPORTISTA),
-    ]
-    for username, rol in usuarios:
-        crear_usuario(web_prueba, username, rol, CONTRASENA)
-    yield web_prueba
-    web_prueba.bd.cerrar()
+from puente.protocolo import TIPO_CMD, ContadorSecuenciaServidor
+from puente.secuencia import (
+    ClaseSecuencia,
+    EmisorTramasServidor,
+    RastreadorSecuencia,
+)
 
 
-def _cliente_como(web, rol: Rol):
-    cliente = web.app.test_client()
-    username = {
-        Rol.TERMINAL: "terminal01",
-        Rol.NAVIERA: "naviera01",
-        Rol.AGENTE: "agente01",
-        Rol.AUTORIDAD: "autoridad01",
-    }[rol]
-    entrar(cliente, username, CONTRASENA)
-    return cliente
+def test_primer_seq_recibido_se_toma_como_base():
+    rastreador = RastreadorSecuencia()
+    evento = rastreador.registrar(1042)
+    assert evento.clase is ClaseSecuencia.NUEVO
 
 
-def _ruta_codigo(web):
-    """URL real del endpoint de vinculación con un transportista existente."""
-    id_transportista = web.usuarios.con_hash_por_username("transportista01")[0].id
-    return f"/api/transportistas/{id_transportista}/codigo-vinculacion"
+def test_seq_consecutiva_es_nueva():
+    rastreador = RastreadorSecuencia()
+    rastreador.registrar(1042)
+    assert rastreador.registrar(1043).clase is ClaseSecuencia.NUEVO
+    assert rastreador.registrar(1044).clase is ClaseSecuencia.NUEVO
 
 
-# (ruta en función de la app, método, roles permitidos por la matriz §7.4)
-ENDPOINTS = [
-    (_ruta_codigo, "post", {Rol.TERMINAL}),  # §7.4: solo TERMINAL genera códigos
-    (
-        lambda web: "/api/manifiestos",
-        "get",
-        {Rol.TERMINAL, Rol.NAVIERA, Rol.AGENTE, Rol.AUTORIDAD},  # §7.4: ver manifiestos
-    ),
-]
+def test_salto_de_seq_reporta_cantidad_de_faltantes():
+    rastreador = RastreadorSecuencia()
+    rastreador.registrar(1042)
+    evento = rastreador.registrar(1045)
+    assert evento.clase is ClaseSecuencia.SALTO
+    assert evento.faltantes == 2
+    assert evento.seq_previa == 1042
 
 
-@pytest.mark.parametrize("ruta,metodo,permitidos", ENDPOINTS)
-def test_cada_rol_permitido_pasa_y_los_demas_reciben_403_explicito(web, ruta, metodo, permitidos):
-    for rol in ROLES_WEB:
-        cliente = _cliente_como(web, rol)
-        respuesta = cliente.open(ruta(web), method=metodo.upper())
-        if rol in permitidos:
-            assert respuesta.status_code == 200, (rol, ruta)
-        else:
-            assert respuesta.status_code == 403, (rol, ruta)
-            cuerpo = respuesta.get_json()
-            # §7.5.1: error explícito con la forma exigida.
-            assert cuerpo["error"] == "ACCION_NO_PERMITIDA"
-            assert f"El rol {rol.value} no puede" in cuerpo["mensaje"]
+def test_seq_repetida_se_detecta_como_duplicado():
+    rastreador = RastreadorSecuencia()
+    rastreador.registrar(1042)
+    assert rastreador.registrar(1042).clase is ClaseSecuencia.DUPLICADO
 
 
-def test_sin_sesion_toda_ruta_responde_401(web):
-    cliente = web.app.test_client()
-    for ruta, metodo, _ in ENDPOINTS:
-        respuesta = cliente.open(ruta(web), method=metodo.upper())
-        assert respuesta.status_code == 401, ruta
-        assert respuesta.get_json()["error"] == "SESION_REQUERIDA"
+def test_seq_anterior_se_detecta_como_atrasado():
+    rastreador = RastreadorSecuencia()
+    rastreador.registrar(1045)
+    assert rastreador.registrar(1042).clase is ClaseSecuencia.ATRASADO
 
 
-def test_cada_rechazo_rol_no_permitido_queda_auditado_con_usuario_y_recurso(web):
-    auditoria = web.app.extensions["repositorio_auditoria"]
-    antes = auditoria.contar()
-    cliente = _cliente_como(web, Rol.NAVIERA)
-    respuesta = cliente.post(_ruta_codigo(web))
-    assert respuesta.status_code == 403
-    rechazos = auditoria.ultimos(auditoria.contar() - antes)
-    assert len(rechazos) == 1
-    rechazo = rechazos[0]
-    assert rechazo.username == "naviera01"
-    assert rechazo.rol == "NAVIERA"
-    assert rechazo.accion == "generar_codigo_vinculacion"
-    assert rechazo.recurso.startswith("/api/transportistas/")
-    assert rechazo.motivo == "rol_no_permitido"
+def test_envoltura_de_secuencia_de_32_bits_se_trata_como_nueva():
+    rastreador = RastreadorSecuencia()
+    rastreador.registrar(0xFFFFFFFF)
+    assert rastreador.registrar(0).clase is ClaseSecuencia.NUEVO
 
 
-def test_logout_y_sesion_estan_abiertos_a_cualquier_rol_web(web):
-    for rol in ROLES_WEB:
-        cliente = _cliente_como(web, rol)
-        assert cliente.get("/api/sesion").status_code == 200, rol
-        assert cliente.post("/api/logout").status_code == 200, rol
+def test_emisor_asigna_secuencias_crecientes_a_los_comandos():
+    emisor = EmisorTramasServidor(ContadorSecuenciaServidor(seq_inicial=100))
+    trama_uno = emisor.armar_cmd("AbrirTalanquera", {})
+    trama_dos = emisor.armar_cmd("CerrarTalanquera", {})
+    assert trama_uno.seq == 101
+    assert trama_dos.seq == trama_uno.seq + 1
+    assert trama_uno.tipo == TIPO_CMD
+
+
+def test_emisor_armar_syn_exige_desde_o_estado():
+    emisor = EmisorTramasServidor(ContadorSecuenciaServidor(seq_inicial=0))
+    with pytest.raises(ValueError):
+        emisor.armar_syn()
+    trama = emisor.armar_syn(desde=43, volcar_estado=True)
+    assert trama.campos == {"desde": "43", "estado": "1"}
+
+
+def test_contador_con_base_fija_empezaria_en_el_valor_fijo():
+    contador = ContadorSecuenciaServidor(seq_inicial=41)
+    assert contador.siguiente() == 42

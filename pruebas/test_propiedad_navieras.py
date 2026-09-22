@@ -1,85 +1,104 @@
-"""Utilidades de prueba del núcleo web: aplicación temporal con relojes falsos (T-3)."""
+"""Prueba P11: aislamiento entre navieras — el filtro de propiedad va en SQL (§7.4, §7.5.2).
 
-from dataclasses import dataclass
-from pathlib import Path
+Una NAVIERA consulta el listado y solo recibe sus manifiestos; la otra
+naviera no aparece. TRANSPORTISTA ni siquiera accede a la web (§7.1).
+"""
 
-from flask import Flask
+import pytest
 
-from pruebas.utilidades_pruebas import RelojUtcFalso
-from web.aplicacion import crear_aplicacion
-from web.configuracion.configuracion_web import ConfiguracionWeb
+from pruebas.utilidades_web import crear_usuario, crear_web, entrar
 from web.modelos.usuario import Rol
-from web.repositorios.conexion_bd import RUTA_ESQUEMA_POR_OMISION, ConexionBd
-from web.repositorios.repositorio_usuarios import RepositorioUsuarios
-from web.seguridad.hash_contrasenas import calcular_hash
+from web.repositorios.repositorio_manifiestos import RepositorioManifiestos
 
-CLAVE_SECRETA_DE_PRUEBA = "clave-fija-de-pruebas-no-es-secreto"
-RONDAS_PRUEBA = 4
-"""Rondas bcrypt mínimas: hash rápido y determinista para la suite (S-3 igual)."""
+CONTRASENA = "clave-isolamiento-123"
+CONTRASENA_TRANSPORTISTA = "clave-transportista-123"
 
 
-class RelojEpocaFalso:
-    """Reloj de época inyectable para la expiración por inactividad (T-3)."""
-
-    def __init__(self, inicial_s: float = 1_000_000.0) -> None:
-        self._ahora_s = inicial_s
-
-    def __call__(self) -> float:
-        return self._ahora_s
-
-    def avanzar_s(self, segundos: float) -> None:
-        self._ahora_s += segundos
-
-
-@dataclass
-class WebPrueba:
-    """Aplicación de prueba con sus relojes y su repositorio de usuarios."""
-
-    app: Flask
-    bd: ConexionBd
-    usuarios: RepositorioUsuarios
-    reloj_epoch: RelojEpocaFalso
-    reloj_utc: RelojUtcFalso
-
-
-def crear_web(tmp_path: Path) -> WebPrueba:
-    """Construye una aplicación completa sobre una base temporal (BD-2 real)."""
-    reloj_epoch = RelojEpocaFalso()
-    reloj_utc = RelojUtcFalso()
-    configuracion = ConfiguracionWeb(
-        ruta_bd=str(tmp_path / "web_prueba.db"),
-        ruta_esquema=str(RUTA_ESQUEMA_POR_OMISION),
-        clave_secreta=CLAVE_SECRETA_DE_PRUEBA,
-        puerto_web=0,
-        expiracion_inactividad_min=30,
-        vida_maxima_sesion_h=12,
-        nivel_registro="ERROR",
+@pytest.fixture()
+def web(tmp_path):
+    web_prueba = crear_web(tmp_path)
+    crear_usuario(web_prueba, "terminal01", Rol.TERMINAL, CONTRASENA)
+    crear_usuario(web_prueba, "naviera01", Rol.NAVIERA, CONTRASENA)
+    crear_usuario(web_prueba, "naviera02", Rol.NAVIERA, CONTRASENA)
+    crear_usuario(web_prueba, "agente01", Rol.AGENTE, CONTRASENA)
+    crear_usuario(web_prueba, "transportista01", Rol.TRANSPORTISTA, CONTRASENA_TRANSPORTISTA)
+    # Catálogo mínimo para las claves foráneas del manifiesto (BD-3). C-A se
+    # usa para la demo del aislamiento; §17.3 impide dos pendientes del mismo
+    # contenedor, así que la naviera B declara C-C, no C-A.
+    with web_prueba.bd.candado:
+        web_prueba.bd.conexion.executemany(
+            "INSERT OR IGNORE INTO contenedor (id, descripcion) VALUES (?, ?)",
+            (
+                ("C-A", "Contenedor de la naviera A"),
+                ("C-B", "Contenedor de la naviera A"),
+                ("C-C", "Contenedor de la naviera B"),
+            ),
+        )
+        web_prueba.bd.conexion.commit()
+    manifiestos = RepositorioManifiestos(web_prueba.bd)
+    id_naviera_a = web_prueba.usuarios.con_hash_por_username("naviera01")[0].id
+    id_naviera_b = web_prueba.usuarios.con_hash_por_username("naviera02")[0].id
+    id_transportista = web_prueba.usuarios.con_hash_por_username("transportista01")[0].id
+    manifiestos.crear_demo(
+        "C-A", id_naviera_a, id_transportista, "DEPOSITO", 20000, "2026-09-20T14:00:00.000Z"
     )
-    bd = ConexionBd(configuracion.ruta_bd, configuracion.ruta_esquema)
-    app = crear_aplicacion(configuracion, bd, reloj_epoch=reloj_epoch, fabrica_instante=reloj_utc)
-    return WebPrueba(
-        app=app,
-        bd=bd,
-        usuarios=RepositorioUsuarios(bd),
-        reloj_epoch=reloj_epoch,
-        reloj_utc=reloj_utc,
+    manifiestos.crear_demo(
+        "C-B", id_naviera_a, id_transportista, "RETIRO", 18000, "2026-09-20T14:05:00.000Z"
     )
-
-
-def crear_usuario(web: WebPrueba, username: str, rol: Rol, contrasena: str) -> None:
-    """Alta rápida de usuario de prueba con hash bcrypt de rondas mínimas."""
-    creado = web.usuarios.crear(
-        username=username,
-        password_hash=calcular_hash(contrasena, rondas=RONDAS_PRUEBA),
-        rol=rol,
-        nombre_mostrado=username,
-        creado_en="2026-09-20T14:03:22.418Z",
+    manifiestos.crear_demo(
+        "C-C", id_naviera_b, id_transportista, "DEPOSITO", 21000, "2026-09-20T14:10:00.000Z"
     )
-    if not creado:
-        mensaje = f"el usuario de prueba {username} ya existía"
-        raise RuntimeError(mensaje)
+    yield web_prueba
+    web_prueba.bd.cerrar()
 
 
-def entrar(cliente: Flask.test_client, username: str, contrasena: str) -> object:
-    """Inicia sesión por la API y devuelve la respuesta del servidor."""
-    return cliente.post("/api/login", json={"username": username, "password": contrasena})
+def _cliente_como(web, username: str, contrasena: str):
+    cliente = web.app.test_client()
+    entrar(cliente, username, contrasena)
+    return cliente
+
+
+def test_naviera_a_solo_ve_sus_manifiestos_y_no_los_de_la_naviera_b(web):
+    cliente = _cliente_como(web, "naviera01", CONTRASENA)
+    cuerpo = cliente.get("/api/manifiestos").get_json()
+    assert len(cuerpo["manifiestos"]) == 2
+    assert all(fila["contenedor_id"] in ("C-A", "C-B") for fila in cuerpo["manifiestos"])
+
+
+def test_naviera_b_solo_ve_el_suyo_y_los_de_a_no_aparecen(web):
+    cliente = _cliente_como(web, "naviera02", CONTRASENA)
+    cuerpo = cliente.get("/api/manifiestos").get_json()
+    assert len(cuerpo["manifiestos"]) == 1
+    assert cuerpo["manifiestos"][0]["contenedor_id"] == "C-C"
+
+
+def test_terminal_agente_y_autoridad_ven_el_listado_completo(web):
+    for username in ("terminal01", "agente01"):
+        cliente = _cliente_como(web, username, CONTRASENA)
+        cuerpo = cliente.get("/api/manifiestos").get_json()
+        assert len(cuerpo["manifiestos"]) == 3, username
+
+
+def test_el_repositorio_filtra_en_la_consulta_y_no_en_memoria(web):
+    # §7.5.2: el WHERE naviera_id = ? pertenece al repositorio (único lugar con
+    # SQL, A-2); a nivel de repositorio el filtro también aísla por id.
+    repositorio = RepositorioManifiestos(web.bd)
+    id_naviera_a = web.usuarios.con_hash_por_username("naviera01")[0].id
+    id_naviera_b = web.usuarios.con_hash_por_username("naviera02")[0].id
+    assert {fila.naviera_id for fila in repositorio.listar(naviera_id=id_naviera_a)} == {
+        id_naviera_a
+    }
+    assert {fila.naviera_id for fila in repositorio.listar(naviera_id=id_naviera_b)} == {
+        id_naviera_b
+    }
+    assert len(repositorio.listar()) == 3  # sin filtro: listado completo (TERMINAL)
+
+
+def test_transportista_no_accede_ni_a_la_web_ni_a_la_api(web):
+    cliente = web.app.test_client()
+    respuesta = cliente.post(
+        "/api/login",
+        json={"username": "transportista01", "password": CONTRASENA_TRANSPORTISTA},
+    )
+    assert respuesta.status_code == 403  # §7.1: sin interfaz web; P11 sin excepción
+    assert cliente.get("/api/manifiestos").status_code == 401  # nunca tuvo sesión
