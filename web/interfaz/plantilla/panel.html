@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block titulo %}PORTUS · {{ activa.titulo }}{% endblock %}
+{% block contenido %}
+<article class="panel">
+  <h1>{{ activa.titulo }}</h1>
+  <p>
+    Pestaña del rol <strong>{{ usuario.rol.value }}</strong>. La funcionalidad de esta
+    vista se entrega en {{ etiqueta_etapa }}.
+  </p>
+  <p class="texto-ayuda">
+    El núcleo de la Etapa 4 (autenticación, sesión, matriz de permisos y filtros de
+    propiedad) ya protege esta vista en el servidor.
+  </p>
+</article>
+{% endblock %}
