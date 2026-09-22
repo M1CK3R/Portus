@@ -1,0 +1,27 @@
+# PORTUS Fase 2 — ACL de Mosquitto (SPECS §5.5; CODESTYLE S-4 mínimo privilegio)
+# Cada servicio solo puede leer/escribir los tópicos que le corresponden.
+# Los tópicos se construyen con TOPIC_PREFIX = "portus" (SPECS §5.1, prefijo exacto).
+
+# Puente serial: dueño del enlace con el controlador; solo él publica evt/ y cmd/respuesta.
+user portus-puente
+topic readwrite portus/#
+
+# Servicios web: publica comandos y eventos srv/, lee los eventos del controlador.
+user portus-web
+topic read portus/evt/#
+topic read portus/cmd/respuesta
+topic write portus/cmd/solicitud
+topic readwrite portus/srv/#
+
+# Bot de Telegram: solo escucha los tópicos de los que salen notificaciones (SPECS §5.7).
+user portus-msg
+topic read portus/srv/turno
+topic read portus/srv/retencion
+topic read portus/srv/cita
+topic read portus/srv/alarma
+
+# Navegador del tablero: SOLO lectura (SPECS §5.5; el sinóptico se suscribe por WebSocket).
+user portus-tablero
+topic read portus/evt/#
+topic read portus/srv/#
+topic read portus/cmd/respuesta
