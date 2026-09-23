@@ -49,16 +49,17 @@ class Accion:
     frase_rechazo: str
 
 
-# Filas de la matriz §7.4 aplicadas en la Etapa 4: 2 de las 16. Las otras 14
-# NO son un faltante: el ROADMAP las asigna a etapas posteriores y cada una se
-# agrega aquí como ``Accion`` cuando su endpoint existe —
+# Filas de la matriz §7.4 aplicadas en el servidor: 2 en la Etapa 4 y 4 en la
+# Etapa 5 (turnos, gestión de turnos, bandeja de retenciones y resoluciones).
+# Las demás NO son un faltante: el ROADMAP las asigna a etapas posteriores y
+# cada una se agrega aquí como ``Accion`` cuando su endpoint existe —
 #   Etapa 6  · ver sinóptico, agenda completa de citas, reporte de corrida
-#              (paneles de comandos/alarmas/retenciones completan su lógica en 8-9)
+#              (paneles de comandos/alarmas completan su lógica en 8-9)
 #   Etapa 7  · crear manifiesto, presentar declaración y solicitar levante,
 #              otorgar o retener levante, asignar canal de selectivo,
-#              consultar ubicación (NAVIERA/AGENTE/AUTORIDAD)
-#   Etapa 8  · retenciones operativa (TERMINAL) y aduanera (AUTORIDAD),
-#              corregir peso declarado
+#              consultar ubicación (NAVIERA/AGENTE/AUTORIDAD), Retener turno
+#              RT05 desde Consulta de carga (A9)
+#   Etapa 8  · retenciones operativa y aduanera completas con su pestaña
 #   Etapa 9  · emitir comandos remotos, reconocer alarmas
 #   Etapa 10 · solicitar cita y consultar ubicación «solo los propios» de
 #              TRANSPORTISTA, vía el bot (§7.5.6: mismo control de propiedad)
@@ -71,6 +72,68 @@ ACCION_GENERAR_CODIGO_VINCULACION = Accion(
     nombre="generar_codigo_vinculacion",
     roles_permitidos=frozenset({Rol.TERMINAL}),
     frase_rechazo="generar códigos de vinculación de transportistas",
+)
+ACCION_VER_TURNOS = Accion(
+    nombre="ver_turnos",
+    roles_permitidos=frozenset({Rol.TERMINAL}),
+    frase_rechazo="ver los turnos de la terminal",
+)
+ACCION_GESTIONAR_TURNOS = Accion(
+    nombre="gestionar_turnos",
+    roles_permitidos=frozenset({Rol.TERMINAL}),
+    frase_rechazo="retener o anular turnos",
+)
+ACCION_VER_RETENCIONES = Accion(
+    nombre="ver_retenciones",
+    roles_permitidos=frozenset({Rol.TERMINAL, Rol.AUTORIDAD}),
+    frase_rechazo="ver la bandeja de retenciones",
+)
+ACCION_RESOLVER_RETENCION = Accion(
+    nombre="resolver_retencion",
+    roles_permitidos=frozenset({Rol.TERMINAL, Rol.AUTORIDAD}),
+    frase_rechazo="resolver retenciones",
+)
+
+# Etapa 6 · TERMINAL (§14, §6.3, §12.2, §12.6, §13.3, §11.4, §15.1, §16.3).
+ACCION_VER_SINOPTICO = Accion(
+    nombre="ver_sinoptico",
+    roles_permitidos=frozenset({Rol.TERMINAL}),
+    frase_rechazo="ver el sinóptico de operación",
+)
+ACCION_EMITIR_COMANDO = Accion(
+    nombre="emitir_comando",
+    roles_permitidos=frozenset({Rol.TERMINAL}),
+    frase_rechazo="emitir comandos remotos al controlador",
+)
+ACCION_GESTIONAR_PATIO = Accion(
+    nombre="gestionar_patio",
+    roles_permitidos=frozenset({Rol.TERMINAL}),
+    frase_rechazo="bloquear o liberar posiciones del patio",
+)
+ACCION_VER_GRUA = Accion(
+    nombre="ver_grua",
+    roles_permitidos=frozenset({Rol.TERMINAL}),
+    frase_rechazo="ver la pestaña de grúa",
+)
+ACCION_EXPORTAR_GRUA = Accion(
+    nombre="exportar_grua",
+    roles_permitidos=frozenset({Rol.TERMINAL}),
+    frase_rechazo="exportar el historial de grúa",
+)
+ACCION_RECONOCER_ALARMA = Accion(
+    nombre="reconocer_alarma",
+    roles_permitidos=frozenset({Rol.TERMINAL}),
+    frase_rechazo="reconocer alarmas",
+)
+ACCION_GESTIONAR_CITAS = Accion(
+    nombre="gestionar_citas",
+    roles_permitidos=frozenset({Rol.TERMINAL}),
+    frase_rechazo="cancelar, reprogramar o bloquear citas",
+)
+ACCION_GENERAR_REPORTE = Accion(
+    nombre="generar_reporte",
+    roles_permitidos=frozenset({Rol.TERMINAL}),
+    frase_rechazo="generar reportes de corrida",
 )
 
 CLAVE_CONTEXTO = "contexto_portus"
