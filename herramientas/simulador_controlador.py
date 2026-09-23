@@ -43,8 +43,13 @@ SECUENCIA_EVENTOS: list[tuple[str, dict[str, str]]] = [
     ("TRF", {"evento": "ALINEADO", "veh": "V01"}),
     ("GRU", {"paso": "IZANDO", "pos": "P3", "nivel": "1", "cont": "C01"}),
     ("PAT", {"pos": "P3", "nivel": "1", "cont": "C01", "estado": "OCUPADA"}),
-    ("SAL", {"veh": "V01", "res": "COINCIDE"}),
+    ("GRU", {"paso": "FIN", "pos": "P3", "nivel": "1", "cont": "C01", "res": "OK"}),
+    ("PES", {"veh": "V01", "g": "950", "n": "10", "meseta": "1"}),
+    ("SAL", {"veh": "V01", "res": "DETECTADO"}),
+    ("SAL", {"veh": "V01", "res": "CONFIRMADO"}),
 ]
+"""Valores SAL [DEC]: DETECTADO llega a la puerta; CONFIRMADO pasó la puerta
+(docs/protocolo_serial.md §3.1). El PES de salida usa la tara de V01 (950 g)."""
 
 COMANDOS_RECHAZADOS: dict[str, str] = {
     "AbrirTalanquera": "VEH_BAJO_TALANQUERA",
