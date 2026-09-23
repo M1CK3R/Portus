@@ -21,9 +21,9 @@ El prefijo `portus` es obligatorio y **exacto** (SPECS §5.1): sin sufijos de gr
 | `portus/evt/estado` | Del controlador | **Latido** con el estado general (periodo ≤ 5 s) | **0** | **sí** |
 | `portus/cmd/solicitud` | Hacia el controlador | Comando remoto emitido desde la plataforma | 1 | no |
 | `portus/cmd/respuesta` | Del controlador | ACK/NAK del comando con su causa | 1 | no |
-| `portus/srv/turno` | Del servidor | Cambios de estado del turno (Etapa 5) | 1 | no |
-| `portus/srv/retencion` | Del servidor | Retenciones y resoluciones (Etapa 8) | 1 | no |
-| `portus/srv/alarma` | Del servidor | Alarmas del servidor: AL01, AL09, AL11, AL12, AL13, AL14 | 1 | no |
+| `portus/srv/turno` | Del servidor | Autorización AUT, trabajos JOB, cambios de estado, patio e inventario del turno (Etapa 5) | 1 | no |
+| `portus/srv/retencion` | Del servidor | Retenciones abiertas/resueltas y notificaciones del turno (Etapa 5) | 1 | no |
+| `portus/srv/alarma` | Del servidor | Alarmas del servidor: AL01, AL09, AL10, AL11, AL14 (AL12/AL13 con su planificador) | 1 | no |
 | `portus/srv/cita` | Del servidor | Citas (Etapa 11) | 1 | no |
 | `portus/srv/enlace` | Del puente | Estado del enlace, saltos de secuencia, Last Will | 1 | **sí** |
 
