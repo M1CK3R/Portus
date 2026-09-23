@@ -14,6 +14,7 @@ Lógica de procesamiento sin hilos propia (CODESTYLE T-3): el orquestador de
 import json
 import logging
 import threading
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -24,13 +25,16 @@ from puente.gestor_comandos import GestorComandos, SolicitudComando
 from puente.mensajes_mqtt import (
     TIPO_EVENTO_COMANDO_SOLICITUD,
     TOPICO_CMD_SOLICITUD,
+    TOPICO_SRV_TURNO,
     marca_tiempo_utc,
 )
 from puente.persistencia_sqlite import PersistenciaSqlite
 from puente.protocolo import (
     ESTADO_ACK,
     ESTADO_NAK,
+    TIPO_AUT,
     TIPO_EST,
+    TIPO_JOB,
     TIPO_RSP,
     AnalizadorTramas,
     ResultadoAnalisis,
@@ -81,6 +85,13 @@ class EstadoCompartido:
     candado: threading.Lock = field(default_factory=threading.Lock)
 
 
+TIPO_MQTT_TURNO_AUTORIZACION = "turno.autorizacion"
+TIPO_MQTT_TURNO_TRABAJO = "turno.trabajo"
+
+MAX_IDS_SRV_VISTOS = 1024
+"""Ventana de deduplicación de mensajes srv/ (QoS 1 puede reentregar, §5.5)."""
+
+
 class NucleoPuente:
     """Ensambla protocolo, secuencia, comandos y vigilancia; sin hilos ni I/O de red."""
 
@@ -107,6 +118,7 @@ class NucleoPuente:
         self._rastreador = RastreadorSecuencia()
         self._estado = EstadoCompartido()
         self._candado_escritura = threading.Lock()
+        self._ids_srv_vistos: OrderedDict[str, None] = OrderedDict()
 
     @property
     def estado(self) -> EstadoCompartido:
@@ -303,6 +315,70 @@ class NucleoPuente:
         )
         if topico == TOPICO_CMD_SOLICITUD and tipo == TIPO_EVENTO_COMANDO_SOLICITUD:
             self._atender_solicitud_comando(cast(dict[str, object], datos_evento), ts_mensaje)
+            return
+        if topico == TOPICO_SRV_TURNO and tipo == TIPO_MQTT_TURNO_AUTORIZACION:
+            self._reenviar_aut(cast(dict[str, object], datos_evento), id_mensaje)
+            return
+        if topico == TOPICO_SRV_TURNO and tipo == TIPO_MQTT_TURNO_TRABAJO:
+            self._reenviar_job(cast(dict[str, object], datos_evento), id_mensaje)
+
+    def _primera_vez_srv(self, id_mensaje: str) -> bool:
+        """Dedup por id de los mensajes srv/ que se convierten en serial (§5.5)."""
+        if id_mensaje in self._ids_srv_vistos:
+            return False
+        self._ids_srv_vistos[id_mensaje] = None
+        if len(self._ids_srv_vistos) > MAX_IDS_SRV_VISTOS:
+            self._ids_srv_vistos.popitem(last=False)
+        return True
+
+    def _reenviar_aut(self, datos: dict[str, object], id_mensaje: str) -> None:
+        """Convierte la decisión de garita en una trama AUT hacia el controlador (§4.4)."""
+        if not self._primera_vez_srv(id_mensaje):
+            REGISTRO.info("AUT duplicada (%s): no se reenvía al serial", id_mensaje)
+            return
+        campos: dict[str, str] = {"res": str(datos.get("resultado", "RECHAZADO"))}
+        if datos.get("causa") is not None:
+            campos["causa"] = str(datos["causa"])
+        else:
+            for clave_json, clave_serial in (
+                ("turno", "turno"),
+                ("veh", "veh"),
+                ("tipo_op", "tipo"),
+                ("peso_decl_g", "decl"),
+                ("tol_pct", "tol"),
+                ("canal", "canal"),
+                ("pos_asignada", "pos"),
+                ("nivel", "nivel"),
+            ):
+                valor = datos.get(clave_json)
+                if valor is not None:
+                    campos[clave_serial] = str(valor)
+        trama = self._emisor.armar_mensaje(TIPO_AUT, campos)
+        self.enviar_trama(trama)
+        REGISTRO.info("AUT enviada al controlador: res=%s seq=%d", campos["res"], trama.seq)
+
+    def _reenviar_job(self, datos: dict[str, object], id_mensaje: str) -> None:
+        """Convierte un trabajo de grúa del servidor en una trama JOB (§4.4)."""
+        if not self._primera_vez_srv(id_mensaje):
+            REGISTRO.info("JOB duplicado (%s): no se reenvía al serial", id_mensaje)
+            return
+        campos: dict[str, str] = {
+            "id": str(datos.get("trabajo", "")),
+            "tipo": str(datos.get("tipo", "")),
+            "origen": str(datos.get("origen", "")),
+            "destino": str(datos.get("destino", "")),
+            "nivel": str(datos.get("nivel", "")),
+            "cont": str(datos.get("contenedor", "")),
+            "turno": str(datos.get("turno", "")),
+        }
+        trama = self._emisor.armar_mensaje(TIPO_JOB, campos)
+        self.enviar_trama(trama)
+        REGISTRO.info(
+            "JOB enviado al controlador: id=%s tipo=%s seq=%d",
+            campos["id"],
+            campos["tipo"],
+            trama.seq,
+        )
 
     def _atender_solicitud_comando(self, datos: dict[str, object], ts: str) -> None:
         cmd_id = datos.get("cmd_id")
