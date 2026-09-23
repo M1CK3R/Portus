@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block titulo %}PORTUS · {{ activa.titulo }}{% endblock %}
+{% block contenido %}
+<article class="panel panel-pestanas">
+  <h1>{{ activa.titulo }}</h1>
+  {% include "tabs/" ~ activa.slug ~ ".html" ignore missing %}
+</article>
+<script type="module">
+  const slug = {{ activa.slug|tojson }};
+  const modulos = { operacion: "sinoptico", turnos: "turnos", retenciones: "retenciones",
+                     patio: "patio", grua: "grua", alarmas: "alarmas", citas: "citas", reportes: "reportes" };
+  const nombre = modulos[slug];
+  if (nombre) {
+    import(`/estatico/js/${nombre}.mjs`)
+      .then((m) => {
+        const fns = {
+          sinoptico: m.iniciarSinoptico, turnos: m.iniciarTurnos, retenciones: m.iniciarRetenciones,
+          patio: m.iniciarPatio, grua: m.iniciarGrua, alarmas: m.iniciarAlarmas, citas: m.iniciarCitas,
+          reportes: m.iniciarReportes,
+        };
+        fns[nombre]?.();
+      })
+      .catch((e) => console.error("modulo no cargado", e));
+  }
+</script>
+{% endblock %}

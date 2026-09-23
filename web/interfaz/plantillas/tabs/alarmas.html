@@ -1,0 +1,19 @@
+<section id="alarmas">
+  <label for="alarmas-filtro-severidad">Filtrar por severidad:</label>
+  <select id="alarmas-filtro-severidad">
+    <option value="">Todas</option>
+    <option value="CRITICA">Crítica</option>
+    <option value="ALTA">Alta</option>
+    <option value="MEDIA">Media</option>
+    <option value="BAJA">Baja</option>
+  </select>
+  <p>
+    <button id="alarmas-reconocer-todas" class="boton boton-chico">Reconocer todas (baja/media)</button>
+    <button id="alarmas-silenciar" class="boton boton-chico">Silenciar (AlarmaSilenciar)</button>
+  </p>
+  <h2>Activas</h2>
+  <div id="alarmas-activas" class="lista-datos"></div>
+  <h2>Históricas</h2>
+  <div id="alarmas-historicas" class="lista-datos"></div>
+  <div id="alarmas-error"></div>
+</section>
