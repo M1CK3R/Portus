@@ -23,6 +23,33 @@
     "mensajes_servidor": ["CMD", "AUT", "JOB", "PING", "SYN"],
     "nota": "El SPECS §4.2 dice 'código de 3 letras' pero define PING con 4; se aceptan 3 a 4 letras."
   },
+  "autorizacion": {
+    "resultado": ["AUTORIZADO", "RECHAZADO"],
+    "causas_rechazo": [
+      "VEHICULO_DESCONOCIDO", "SIN_MANIFIESTO", "SIN_LEVANTE",
+      "LEVANTE_RETENIDO", "SIN_CITA", "PARQUEO_LLENO"
+    ],
+    "campos_autorizado": ["res", "turno", "veh", "tipo", "decl", "tol", "canal", "pos", "nivel"],
+    "campos_rechazado": ["res", "causa"],
+    "canal": ["verde", "rojo"]
+  },
+  "trabajo": {
+    "tipos": ["DEPOSITO", "RETIRO", "REMOCION"],
+    "campos": ["id", "tipo", "origen", "destino", "nivel", "cont", "turno"],
+    "marcador_vehiculo": "VEH"
+  },
+  "salida_valores": {
+    "nota": "Valores de SAL.res [DEC] (docs/protocolo_serial.md §3.1)",
+    "valores": ["DETECTADO", "CONFIRMADO"]
+  },
+  "retenciones": {
+    "causas": ["RT01", "RT02", "RT03", "RT04", "RT05", "RT06"],
+    "rol_facultado": {"RT01": "TERMINAL", "RT02": "TERMINAL", "RT03": "AUTORIDAD", "RT04": "TERMINAL", "RT05": "AUTORIDAD", "RT06": "TERMINAL"},
+    "resoluciones": ["ACLARAR", "CORREGIR", "RECHAZAR"]
+  },
+  "alarmas_servidor": {
+    "AL09": "MEDIA", "AL10": "MEDIA", "AL11": "MEDIA", "AL14": "BAJA"
+  },
   "comandos": [
     "AbrirTalanquera",
     "CerrarTalanquera",

@@ -66,8 +66,8 @@ Implementadas en `puente/protocolo.AnalizadorTramas` (analizador incremental no 
 | `EST` | C→S | Latido con estado general (periodo ≤ 5 s) | `portus/evt/estado` |
 | `CMD` | S→C | Comando remoto (los 13 del SPECS §6.1) | ← `portus/cmd/solicitud` |
 | `RSP` | C→S | Aceptación (`ACK`) o rechazo (`NAK`) con causa | `portus/cmd/respuesta` |
-| `AUT` | S→C | Resultado de la validación de garita (SPECS §4.4; se habilita en la Etapa 5) | — (interno) |
-| `JOB` | S→C | Trabajo de grúa (SPECS §4.4; se habilita en la Etapa 5) | — (interno) |
+| `AUT` | S→C | Resultado de la validación de garita con los datos del turno o la causa (SPECS §4.4; habilitado en la Etapa 5) | ← `portus/srv/turno` (tipo `turno.autorizacion`) |
+| `JOB` | S→C | Trabajo de grúa: tipo, origen, destino, nivel (SPECS §4.4; habilitado en la Etapa 5) | ← `portus/srv/turno` (tipo `turno.trabajo`) |
 | `PING` | S→C | Vigilancia del servidor hacia el controlador (SPECS §3.4, A13) | — (interno) |
 | `SYN` | S→C | Pide reenviar desde un `SEQ` y/o volcar estado actual | — (interno) |
 
@@ -83,12 +83,34 @@ El SPECS §5.2 fija la conversión de `PES` (`veh` → `veh`, `g` → `peso_g`, 
 | `TRF` | `evento`→`evento`, `veh`→`veh` |
 | `GRU` | `paso`→`paso`, `pos`→`posicion`, `nivel`→`nivel` (entero), `cont`→`contenedor`, `res`→`resultado` |
 | `PAT` | `pos`→`posicion`, `nivel`→`nivel` (entero), `cont`→`contenedor`, `estado`→`estado` |
-| `SAL` | `veh`→`veh`, `res`→`resultado`, `causa`→`causa` |
+| `SAL` | `veh`→`veh`, `res`→`resultado`, `causa`→`causa`. Valores de `res` [DEC]: `DETECTADO` (vehículo identificado en el punto de salida; el servidor compara con el turno en `EnSalida`) y `CONFIRMADO` (el controlador confirma que el vehículo pasó la puerta; cierra el turno, §8.6) |
 | `ALM` | `cod`→`codigo`, `sev`→`severidad` |
 | `EST` | `modo`→`modo`, `grua`→`grua`, `aguja`→`aguja`, `cola`→`trabajos_en_cola` (entero), `espera`→`vehiculos_en_espera` (entero), `err`→`errores_trama` (entero), `dif`→`eventos_diferidos` (entero), `link`→`enlace` (bool) |
 | `RSP` | `estado`→`estado` (`ACK`\|`NAK`), `causa`→`causa` |
 
 Los enteros se convierten solo si el texto es numérico; si no, el valor viaja como texto y la anomalía queda en el registro (CODESTYLE D-10).
+
+### 3.2 Campos de `AUT` y `JOB` [PROP, habilitado en la Etapa 5]
+
+La lógica del servidor publica en `portus/srv/turno` y el puente convierte el mensaje en trama serial (`puente/nucleo_puente._reenviar_aut`/`._reenviar_job`). El envoltorio JSON usa las claves del SPECS §4.4; la trama serial usa claves cortas [DEC]:
+
+| `AUT` JSON → serial | Contenido |
+|---|---|
+| `resultado`→`res` | `AUTORIZADO` \| `RECHAZADO` |
+| `turno`, `veh`, `tipo_op`→`tipo`, `peso_decl_g`→`decl`, `tol_pct`→`tol`, `canal`, `pos_asignada`→`pos`, `nivel` | Datos del turno; solo van en `AUTORIZADO` |
+| `causa` | Código de §9.4; solo va en `RECHAZADO` (el controlador lo muestra en la pantalla de garita) |
+
+Ejemplos:
+
+```
+^…|AUT|res=AUTORIZADO,turno=1,veh=V01,tipo=DEPOSITO,decl=38500,tol=5,canal=verde,pos=P1,nivel=1#CRC
+^…|AUT|res=RECHAZADO,causa=PARQUEO_LLENO#CRC
+^…|JOB|id=1,tipo=DEPOSITO,origen=VEH,destino=P1,nivel=1,cont=C01,turno=1#CRC
+```
+
+El marcador `VEH` en `JOB.origen/destino` designa al vehículo [DEC]. El puente deduplica por el `id` del mensaje (§5.5): una reentrega de QoS 1 no reabre la talanquera.
+
+> La `SEQ` de `AUT`/`JOB` sale del mismo contador S→C de `CMD` (§4.2).
 
 ## 4. Secuencia
 
