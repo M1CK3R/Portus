@@ -89,6 +89,13 @@ def panel(slug: str) -> Respuesta:
     activa = pestana_por_slug(usuario.rol, slug)
     if activa is None:
         return flask.abort(404)
+    config = contexto().configuracion
+    host = config.mqtt_host or "127.0.0.1"
+    mqtt = {
+        "ws": f"ws://{host}:{config.mqtt_ws_puerto}/",
+        "usuario": config.mqtt_tablero_usuario,
+        "contrasena": config.mqtt_tablero_contrasena,
+    }
     return flask.make_response(
         flask.render_template(
             "panel.html",
@@ -96,6 +103,7 @@ def panel(slug: str) -> Respuesta:
             pestanas=pestanas_de_rol(usuario.rol),
             activa=activa,
             etiqueta_etapa=ETIQUETA_ETAPA_POR_SLUG.get(slug, "Etapa posterior"),
+            mqtt=mqtt,
         )
     )
 

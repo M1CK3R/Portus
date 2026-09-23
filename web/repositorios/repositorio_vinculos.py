@@ -56,6 +56,15 @@ class RepositorioVinculos:
             )
             self._bd.conexion.commit()
 
+    def vinculados(self) -> set[int]:
+        """Ids de transportistas con al menos un código consumido (vinculados, §15.1)."""
+        with self._bd.candado:
+            filas = self._bd.conexion.execute(
+                "SELECT DISTINCT transportista_id FROM codigo_vinculacion "
+                "WHERE usado_en IS NOT NULL"
+            ).fetchall()
+        return {int(fila[0]) for fila in filas}
+
 
 def _codigo_de_fila(fila: sqlite3.Row) -> CodigoVinculacion:
     """Convierte la fila tipada en el modelo del dominio (PY-2)."""

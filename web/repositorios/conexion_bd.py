@@ -19,6 +19,19 @@ el layout del SPECS §19.2 (``/opt/portus/web/repositorios/conexion_bd.py`` y
 ``/opt/portus/db/esquema.sql``) resuelve igual que en el repositorio."""
 
 
+def id_insertado(cursor: sqlite3.Cursor) -> int:
+    """Id autogenerado del último INSERT del cursor (D-5: fallo explícito).
+
+    ``lastrowid`` se tipa ``int | None`` porque es ``None`` antes del primer
+    INSERT; tras un INSERT exitoso siempre está presente, así que la ausencia
+    se eleva en lugar de inventar un id.
+    """
+    if cursor.lastrowid is None:
+        mensaje = "el INSERT no devolvió un id autogenerado"
+        raise RuntimeError(mensaje)
+    return int(cursor.lastrowid)
+
+
 class ConexionBd:
     """Abre la base, aplica el esquema y expone conexión + candado (BD-2)."""
 
@@ -37,9 +50,15 @@ class ConexionBd:
         with self._candado:
             # WAL: el puente escribe eventos mientras la web lee (SPECS §19.2).
             self._conexion.execute("PRAGMA journal_mode=WAL")
-            # Las claves foráneas se comprueban de verdad (CODESTYLE BD-3).
-            self._conexion.execute("PRAGMA foreign_keys=ON")
+            # FK desactivada durante la migración del esquema (DDL): la recreación
+            # de ``manifiesto`` (migración 003) hace DROP+RENAME en cada arranque
+            # y, con FK ON, el DROP dispara un DELETE implícito que violaría las
+            # FK de ``solicitud_levante``/``cita`` que ya referencian a
+            # ``manifiesto``. Se reactiva tras el esquema para el runtime (BD-3:
+            # las claves foráneas se comprueban de verdad en los datos).
+            self._conexion.execute("PRAGMA foreign_keys=OFF")
             self._conexion.executescript(esquema_sql)
+            self._conexion.execute("PRAGMA foreign_keys=ON")
             self._conexion.commit()
         REGISTRO.info("Conexión web lista en %s (esquema: %s)", ruta_bd, ruta_esquema)
 

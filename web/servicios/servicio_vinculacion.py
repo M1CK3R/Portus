@@ -11,6 +11,7 @@ comparación en tiempo constante; el método ya existe para fijar el ciclo.
 import hmac
 import secrets
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from web.modelos.usuario import Rol, Usuario
@@ -77,3 +78,38 @@ class ServicioVinculacion:
             return None
         self._vinculos.marcar_usado(objetivo.codigo, marca_utc(ahora))
         return self._usuarios.buscar_por_id(objetivo.transportista_id)
+
+    def listar_panel_vinculacion(self) -> list["TransportistaPanel"]:
+        """Lista de transportistas con su estado de vinculación (§14.5, A17).
+
+        ``vinculado`` indica que ya consumió un código (la cuenta de mensajería
+        quedó asociada); ``codigo_activo`` trae el código vigente y su expiración
+        para mostrar el tiempo restante e invalidar el anterior al generar uno.
+        """
+        ahora = self._fabrica_instante()
+        ts = marca_utc(ahora)
+        activos = {c.transportista_id: c for c in self._vinculos.activos(ts)}
+        vinculados = self._vinculos.vinculados()
+        return [
+            TransportistaPanel(
+                id=t.id,
+                nombre_mostrado=t.nombre_mostrado,
+                username=t.username,
+                vinculado=t.id in vinculados,
+                codigo_activo=activos[t.id].codigo if t.id in activos else None,
+                expira_en=activos[t.id].expira_en if t.id in activos else None,
+            )
+            for t in self._usuarios.listar_por_rol(Rol.TRANSPORTISTA)
+        ]
+
+
+@dataclass(frozen=True)
+class TransportistaPanel:
+    """Fila del panel de vinculación de transportistas (§14.5, A17)."""
+
+    id: int
+    nombre_mostrado: str
+    username: str
+    vinculado: bool
+    codigo_activo: str | None
+    expira_en: str | None

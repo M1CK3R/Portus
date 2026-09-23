@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 import flask
 from flask import Flask
 
+from web.configuracion.configuracion_logica import ConfiguracionLogica
 from web.configuracion.configuracion_web import ConfiguracionWeb
 from web.contexto import (
     CLAVE_AUDITORIA,
@@ -23,6 +24,7 @@ from web.contexto import (
     contexto,
     fabrica_instante_utc,
 )
+from web.mqtt.publicador_logica import PublicadorSordo
 from web.repositorios.conexion_bd import ConexionBd
 from web.repositorios.repositorio_auditoria import RepositorioAuditoria
 from web.repositorios.repositorio_manifiestos import RepositorioManifiestos
@@ -32,6 +34,8 @@ from web.rutas.rutas_api import crear_blueprint_api
 from web.rutas.rutas_web import crear_blueprint_web
 from web.seguridad.permisos import ERROR_SESION_EXPIRADA, Respuesta, respuesta_error
 from web.seguridad.sesion import cerrar_sesion, marcar_actividad, ultimo_acceso_s, usuario_en_sesion
+from web.servicios.nucleo_logica import crear as crear_nucleo_logica
+from web.servicios.puertos import PublicadorLogica
 from web.servicios.servicio_auth import ServicioAuth
 from web.servicios.servicio_vinculacion import ServicioVinculacion
 
@@ -45,8 +49,13 @@ def crear_aplicacion(
     bd: ConexionBd,
     reloj_epoch: Callable[[], float] = RELOJ_EPOCH_POR_OMISION,
     fabrica_instante: Callable[[], datetime] = fabrica_instante_utc,
+    publicador_logica: PublicadorLogica | None = None,
 ) -> Flask:
-    """Construye la aplicación con sus capas y sus reglas de sesión (§7.3)."""
+    """Construye la aplicación con sus capas y sus reglas de sesión (§7.3).
+
+    La lógica del turno (Etapa 5) se construye sobre la misma base; sin
+    ``publicador_logica`` usa un publicador sordo (modo sin broker, pruebas).
+    """
     app = Flask(
         __name__,
         template_folder="interfaz/plantillas",
@@ -64,6 +73,12 @@ def crear_aplicacion(
     repositorio_auditoria = RepositorioAuditoria(bd)
     repositorio_usuarios = RepositorioUsuarios(bd)
     repositorio_vinculos = RepositorioVinculos(bd)
+    nucleo = crear_nucleo_logica(
+        bd,
+        publicador_logica if publicador_logica is not None else PublicadorSordo(),
+        fabrica_instante,
+        ConfiguracionLogica(politica_asignacion=configuracion.politica_asignacion),
+    )
     contexto_web = ContextoWeb(
         usuarios=repositorio_usuarios,
         manifiestos=RepositorioManifiestos(bd),
@@ -75,6 +90,7 @@ def crear_aplicacion(
             usuarios=repositorio_usuarios,
             fabrica_instante=fabrica_instante,
         ),
+        nucleo=nucleo,
         configuracion=configuracion,
         reloj_epoch=reloj_epoch,
     )

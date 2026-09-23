@@ -33,6 +33,15 @@ class RepositorioUsuarios:
             ).fetchone()
         return None if fila is None else _usuario_de_fila(fila)
 
+    def listar_por_rol(self, rol: Rol) -> list[Usuario]:
+        """Lista los usuarios de un rol (§7.1); el panel A17 lista transportistas."""
+        with self._bd.candado:
+            filas = self._bd.conexion.execute(
+                f"SELECT {COLUMNAS_USUARIO} FROM usuario WHERE rol = ? ORDER BY id",
+                (rol.value,),
+            ).fetchall()
+        return [_usuario_de_fila(fila) for fila in filas]
+
     def cambiar_activo(self, username: str, activo: bool) -> None:
         """Habilita o deshabilita un usuario; lo usa la administración y las pruebas."""
         with self._bd.candado:

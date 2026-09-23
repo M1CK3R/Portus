@@ -18,6 +18,10 @@ WEB_PUERTO_POR_OMISION = 8000
 WEB_EXPIRACION_INACTIVIDAD_MIN_POR_OMISION = 30
 WEB_CLAVE_SECRETA_POR_OMISION = "solo-desarrollo-cambiar-en-portus-env"
 WEB_VIDA_MAXIMA_SESION_H_POR_OMISION = 12
+MQTT_HOST_POR_OMISION = "127.0.0.1"
+MQTT_PUERTO_POR_OMISION = 1883
+MQTT_USUARIO_POR_OMISION = "portus-web"
+MQTT_CONTRASENA_POR_OMISION = "portus"
 NIVEL_REGISTRO_POR_OMISION = "INFO"
 
 NIVEL_POR_NOMBRE = {
@@ -40,6 +44,18 @@ class ConfiguracionWeb:
     expiracion_inactividad_min: int
     vida_maxima_sesion_h: int
     nivel_registro: str
+    mqtt_host: str = MQTT_HOST_POR_OMISION
+    mqtt_puerto: int = MQTT_PUERTO_POR_OMISION
+    mqtt_usuario: str = MQTT_USUARIO_POR_OMISION
+    mqtt_contrasena: str = MQTT_CONTRASENA_POR_OMISION
+    # Navegador del sinóptico (§5.5: solo lectura). El WebSocket del broker
+    # exige auth (mosquitto_dev.conf: allow_anonymous false); la web inyecta
+    # estas credenciales de solo lectura en la página para que el cliente
+    # MQTT del navegador las envíe en el CONNECT.
+    mqtt_ws_puerto: int = 9001
+    mqtt_tablero_usuario: str = "portus-tablero"
+    mqtt_tablero_contrasena: str = "portus"
+    politica_asignacion: str = "FASE1"
 
     @property
     def expiracion_inactividad_s(self) -> float:
@@ -86,6 +102,14 @@ class ConfiguracionWeb:
                 valores, "WEB_VIDA_MAXIMA_SESION_H", WEB_VIDA_MAXIMA_SESION_H_POR_OMISION
             ),
             nivel_registro=valores.get("NIVEL_REGISTRO", NIVEL_REGISTRO_POR_OMISION),
+            mqtt_host=valores.get("MQTT_HOST", MQTT_HOST_POR_OMISION),
+            mqtt_puerto=_entero(valores, "MQTT_PUERTO", MQTT_PUERTO_POR_OMISION),
+            mqtt_usuario=valores.get("MQTT_USUARIO", MQTT_USUARIO_POR_OMISION),
+            mqtt_contrasena=valores.get("MQTT_CONTRASENA", MQTT_CONTRASENA_POR_OMISION),
+            mqtt_ws_puerto=_entero(valores, "MQTT_WS_PUERTO", 9001),
+            mqtt_tablero_usuario=valores.get("MQTT_TABLERO_USUARIO", "portus-tablero"),
+            mqtt_tablero_contrasena=valores.get("MQTT_TABLERO_CONTRASENA", "portus"),
+            politica_asignacion=valores.get("POLITICA_ASIGNACION", "FASE1"),
         )
 
     @classmethod
