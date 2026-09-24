@@ -17,6 +17,7 @@ from web.modelos.turno import (
     estado_de_regreso,
     transicion_valida,
 )
+from web.repositorios.repositorio_ciclo_cita import RepositorioCicloCita
 from web.repositorios.repositorio_citas import RepositorioCitas
 from web.repositorios.repositorio_manifiestos import RepositorioManifiestos
 from web.repositorios.repositorio_turnos import RepositorioTurnos
@@ -41,12 +42,14 @@ class ServicioTurnos:
         turnos: RepositorioTurnos,
         manifiestos: RepositorioManifiestos,
         citas: RepositorioCitas,
+        ciclo_citas: RepositorioCicloCita,
         publicador: PublicadorLogica,
         fabrica_instante: Callable[[], datetime],
     ) -> None:
         self._turnos = turnos
         self._manifiestos = manifiestos
         self._citas = citas
+        self._ciclo_citas = ciclo_citas
         self._publicador = publicador
         self._fabrica_instante = fabrica_instante
 
@@ -143,12 +146,14 @@ class ServicioTurnos:
         return self._turnos.buscar_por_id(cerrado.id) or cerrado
 
     def anular(self, turno: Turno, motivo: str, origen: str, seq: int | None = None) -> Turno:
-        """Anula el turno con su motivo; el manifiesto refleja el desenlace (§8.3)."""
+        """Anula el turno con su motivo; manifiesto y cita reflejan el desenlace (§8.3, A11)."""
         anulado = self.transicionar(
             turno, EstadoTurno.ANULADO, f"Turno anulado: {motivo}", {}, origen, seq
         )
         self._turnos.actualizar_datos(anulado.id, {"motivo_anulacion": motivo})
         self._manifiestos.marcar_operativo(anulado.manifiesto_id, "anulado")
+        if anulado.cita_id is not None:
+            self._ciclo_citas.cancelar_por_anulacion(anulado.cita_id)
         return self._turnos.buscar_por_id(anulado.id) or anulado
 
     def registrar_evento(

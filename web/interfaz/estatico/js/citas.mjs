@@ -1,6 +1,8 @@
 // Pestaña Citas (SPECS §14.5, §11.4): agenda del día por franjas, cancelar,
 // reprogramar, bloquear franja, cumplimiento y panel de vinculación (A17).
-// Render con textContent (JS-3).
+// Cada cita muestra su estado (§11.2); solo la programada que ningún turno
+// usó admite cancelar o reprogramar. La ocupación cuenta solo programadas
+// (§11.1 regla 2). Render con textContent (JS-3).
 
 import { crear, getJson, limpiar, mostrarError, postJson } from "./utilidades.mjs";
 
@@ -12,6 +14,8 @@ export function iniciarCitas() {
   const contVinc = document.getElementById("citas-vinculacion");
   const error = document.getElementById("citas-error");
   const fechaSel = document.getElementById("citas-fecha");
+  const formBloquear = document.getElementById("citas-bloquear");
+  const horaBloquear = document.getElementById("citas-bloquear-hora");
 
   async function cargar() {
     const fecha = fechaSel?.value || hoyLocal();
@@ -40,25 +44,31 @@ export function iniciarCitas() {
     }
     franjas.forEach((fr) => {
       const tarjeta = crear("div", `franja ${fr.bloqueada ? "bloqueada" : ""}`);
-      tarjeta.appendChild(crear("h4", "", `${fr.inicio}–${fr.fin} · ${fr.citas.length}/${fr.capacidad}`));
+      const ocupadas = fr.citas.filter((c) => c.estado === "programada").length;
+      tarjeta.appendChild(crear("h4", "", `${fr.inicio}–${fr.fin} · ${ocupadas}/${fr.capacidad}`));
       if (fr.bloqueada) tarjeta.appendChild(crear("p", "etiqueta-bloqueada", "BLOQUEADA"));
       const lista = crear("ul", "lista-citas");
-      fr.citas.forEach((c) => {
-        const item = crear("li", "", `${c.transportista} · ${c.contenedor} · ${c.vehiculo || "—"}`);
-        const cancelar = crear("button", "boton boton-chico", "Cancelar");
-        cancelar.addEventListener("click", () => cancelarCita(c.id));
-        const repro = crear("button", "boton boton-chico", "Reprogramar");
-        repro.addEventListener("click", () => reprogramarCita(c.id));
-        item.appendChild(cancelar);
-        item.appendChild(repro);
-        lista.appendChild(item);
-      });
+      fr.citas.forEach((c) => lista.appendChild(itemCita(c)));
       tarjeta.appendChild(lista);
       const bloquear = crear("button", "boton boton-chico", "Bloquear franja");
       bloquear.addEventListener("click", () => bloquearFranja(fr.fecha, fr.inicio));
       tarjeta.appendChild(bloquear);
       contFranjas.appendChild(tarjeta);
     });
+  }
+
+  function itemCita(c) {
+    const item = crear("li", "", `${c.transportista} · ${c.contenedor} · ${c.vehiculo || "—"}`);
+    item.appendChild(crear("span", `estado-cita estado-${c.estado}`, textoEstado(c)));
+    if (c.estado === "programada" && !c.en_uso) {
+      const cancelar = crear("button", "boton boton-chico", "Cancelar");
+      cancelar.addEventListener("click", () => cancelarCita(c.id));
+      const repro = crear("button", "boton boton-chico", "Reprogramar");
+      repro.addEventListener("click", () => reprogramarCita(c.id));
+      item.appendChild(cancelar);
+      item.appendChild(repro);
+    }
+    return item;
   }
 
   async function cargarVinculacion() {
@@ -137,9 +147,21 @@ export function iniciarCitas() {
     }
   }
 
+  formBloquear?.addEventListener("submit", (evento) => {
+    evento.preventDefault();
+    if (horaBloquear?.value) bloquearFranja(fechaSel?.value || hoyLocal(), horaBloquear.value);
+  });
   fechaSel?.addEventListener("change", cargar);
   if (fechaSel && !fechaSel.value) fechaSel.value = hoyLocal();
   cargar();
+}
+
+function textoEstado(c) {
+  // Estado exacto de §11.2 más el cumplimiento de ventana cuando ya se registró (A11).
+  if (c.estado === "programada" && c.en_uso) return "en terminal";
+  if (c.cumplida_en_ventana === true) return `${c.estado} · en ventana`;
+  if (c.cumplida_en_ventana === false) return `${c.estado} · fuera de ventana`;
+  return c.estado;
 }
 
 function hoyLocal() {

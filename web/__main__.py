@@ -9,6 +9,7 @@ es el servicio que ejecuta el carril Aplicación).
 import argparse
 import logging
 import sys
+from datetime import UTC, datetime, timedelta
 
 from waitress import serve
 
@@ -17,12 +18,22 @@ from web.aplicacion import crear_aplicacion
 from web.configuracion.configuracion_web import ConfiguracionWeb
 from web.mqtt.cliente_logica import ClienteLogica
 from web.mqtt.publicador_logica import PublicadorLogicaWeb
+from web.planificador import TareaPeriodica
 from web.repositorios.conexion_bd import ConexionBd
+from web.tiempo import marca_utc
 
 REGISTRO = logging.getLogger(__name__)
 
 HILOS_WAITRESS = 8
 """Hilos concurrentes: suficiente para los cinco roles de la demostración."""
+PERIODO_REVISION_RETENCIONES_S = 15
+"""AL12 sale a lo sumo 15 s después de cumplirse los 30 min de retención (§13.1)."""
+PERIODO_REVISION_PERMANENCIA_S = 60
+"""AL13 sale a lo sumo 1 min después de cumplirse las 2 h de permanencia (§13.1)."""
+PERIODO_VENCIMIENTO_CITAS_S = 60
+"""Una cita no atendida queda vencida a lo sumo 1 min después de cerrar su ventana (§11.2)."""
+VENTANA_RECONCILIACION_ALARMAS_H = 24
+"""Al arrancar se reinyectan las alarmas guardadas por el puente en este lapso."""
 
 
 def _leer_argumentos() -> argparse.Namespace:
@@ -60,19 +71,50 @@ def main() -> int:
         usuario=configuracion.mqtt_usuario,
         contrasena=configuracion.mqtt_contrasena,
     )
+    tareas: list[TareaPeriodica] = []
     try:
         aplicacion = crear_aplicacion(
             configuracion, bd, publicador_logica=PublicadorLogicaWeb(cliente)
         )
         # El cliente ya conoce el núcleo creado dentro de la aplicación (PY-7).
-        cliente.vincular(aplicacion.extensions["contexto_portus"].nucleo)
+        nucleo = aplicacion.extensions["contexto_portus"].nucleo
+        # E14: alarmas (AL01 retroactiva, ALM) que el puente guardó con la web
+        # caída; antes de escuchar en vivo para no competir con el hilo MQTT.
+        desde = datetime.now(UTC) - timedelta(hours=VENTANA_RECONCILIACION_ALARMAS_H)
+        nucleo.reconciliar_alarmas(marca_utc(desde))
+        cliente.vincular(nucleo)
         cliente.iniciar()
+        tareas.append(
+            TareaPeriodica(
+                "vigilante-retenciones",
+                PERIODO_REVISION_RETENCIONES_S,
+                nucleo.vigilante_retenciones.revisar,
+            )
+        )
+        tareas.append(
+            TareaPeriodica(
+                "vigilante-permanencia",
+                PERIODO_REVISION_PERMANENCIA_S,
+                nucleo.vigilante_permanencia.revisar,
+            )
+        )
+        tareas.append(
+            TareaPeriodica(
+                "vencimiento-citas",
+                PERIODO_VENCIMIENTO_CITAS_S,
+                nucleo.citas_svc.vencer_no_atendidas,
+            )
+        )
+        for tarea in tareas:
+            tarea.iniciar()
         REGISTRO.info(
             "portus-web escuchando en http://0.0.0.0:%d/ (lógica del turno activa)",
             configuracion.puerto_web,
         )
         serve(aplicacion, host="0.0.0.0", port=configuracion.puerto_web, threads=HILOS_WAITRESS)
     finally:
+        for tarea in tareas:
+            tarea.detener()
         cliente.detener()
         bd.cerrar()
     return 0

@@ -14,11 +14,12 @@ import logging
 from collections.abc import Callable
 from datetime import datetime
 
-from web.modelos.cita import esta_dentro_de_ventana
+from web.modelos.alarma import CodigoAlarma
+from web.modelos.cita import esta_dentro_de_ventana, fecha_local
 from web.modelos.garita import CausaRechazoGarita, DecisionGarita, ResultadoAutorizacion
 from web.modelos.retencion import CausaRetencion
 from web.modelos.turno import Turno
-from web.repositorios.repositorio_alarmas import RepositorioAlarmas
+from web.repositorios.repositorio_ciclo_cita import RepositorioCicloCita
 from web.repositorios.repositorio_citas import CitaConFranja, RepositorioCitas
 from web.repositorios.repositorio_intentos import RepositorioIntentos
 from web.repositorios.repositorio_inventario import RepositorioInventario
@@ -29,6 +30,7 @@ from web.repositorios.repositorio_manifiestos import (
 )
 from web.repositorios.repositorio_plazas import RepositorioPlazas
 from web.repositorios.repositorio_vehiculos import RepositorioVehiculos
+from web.servicios.emisor_alarmas import EmisorAlarmas
 from web.servicios.puertos import PublicadorLogica
 from web.servicios.servicio_retenciones import ServicioRetenciones
 from web.servicios.servicio_trabajos import ServicioTrabajos
@@ -36,9 +38,6 @@ from web.servicios.servicio_turnos import ServicioTurnos
 from web.tiempo import marca_utc
 
 REGISTRO = logging.getLogger(__name__)
-
-TOPICO_SRV_ALARMA = "portus/srv/alarma"
-TIPO_ALARMA_SERVIDOR = "alarma.servidor"
 
 
 class ServicioGarita:
@@ -50,6 +49,7 @@ class ServicioGarita:
         manifiestos: RepositorioManifiestos,
         levantes: RepositorioLevantes,
         citas: RepositorioCitas,
+        ciclo_citas: RepositorioCicloCita,
         plazas: RepositorioPlazas,
         intentos: RepositorioIntentos,
         inventario: RepositorioInventario,
@@ -58,12 +58,13 @@ class ServicioGarita:
         trabajos: ServicioTrabajos,
         publicador: PublicadorLogica,
         fabrica_instante: Callable[[], datetime],
-        alarmas: RepositorioAlarmas,
+        alarmas: EmisorAlarmas,
     ) -> None:
         self._vehiculos = vehiculos
         self._manifiestos = manifiestos
         self._levantes = levantes
         self._citas = citas
+        self._ciclo_citas = ciclo_citas
         self._plazas = plazas
         self._intentos = intentos
         self._inventario = inventario
@@ -110,14 +111,14 @@ class ServicioGarita:
                 vehiculo_id=vehiculo.id,
                 detalle=f"levante del manifiesto {manifiesto.id} en estado '{estado_texto}'",
             )
-        cita = self._citas.programada_de_manifiesto(manifiesto.id)
+        cita = self._cita_presentable(manifiesto.id)
         if cita is None:
             return self._rechazar(
                 identificador,
                 CausaRechazoGarita.SIN_CITA,
                 ts,
                 vehiculo_id=vehiculo.id,
-                detalle=f"sin cita programada para el manifiesto {manifiesto.id}",
+                detalle=f"sin cita programada ni vencida hoy para el manifiesto {manifiesto.id}",
             )
         return self._autorizar(identificador, vehiculo.id, manifiesto, cita, levante.canal, seq, ts)
 
@@ -252,21 +253,21 @@ class ServicioGarita:
     def _alarmar_al11(self, identificador: str, detalle: str, ts: str) -> None:
         """AL11 (media, origen servidor): parqueo lleno en el momento del riesgo (§13.1)."""
         datos: dict[str, object] = {"vehiculo": identificador, "detalle": detalle}
-        self._alarmas.registrar(
-            "AL11", "MEDIA", "servidor", "Parqueo de retención lleno", datos, ts
-        )
-        self._publicador.publicar(
-            TOPICO_SRV_ALARMA, TIPO_ALARMA_SERVIDOR, {"codigo": "AL11", **datos}
-        )
+        self._alarmas.emitir(CodigoAlarma.AL11, datos, ts)
 
     # ---------------------------------------------------------------- helpers
 
     def _elegir_manifiesto(self, transportista_id: int) -> ManifiestoVigente | None:
-        """El manifiesto a atender: con cita programada primero; si no, el menor id [DEC]."""
+        """El manifiesto a atender: con cita presentable primero; si no, el menor id [DEC]."""
         vigentes = self._manifiestos.vigentes_de_transportista(transportista_id)
         if not vigentes:
             return None
         for candidato in vigentes:
-            if self._citas.programada_de_manifiesto(candidato.id) is not None:
+            if self._cita_presentable(candidato.id) is not None:
                 return candidato
         return vigentes[0]
+
+    def _cita_presentable(self, manifiesto_id: int) -> CitaConFranja | None:
+        """Programada, o vencida hoy sin usar: llegar tarde es RT04, no rechazo (§11.1)."""
+        hoy = fecha_local(self._fabrica_instante())
+        return self._ciclo_citas.presentable_de_manifiesto(manifiesto_id, hoy)
