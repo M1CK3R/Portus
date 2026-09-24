@@ -6,7 +6,7 @@
   <title>PORTUS · {% block titulo %}Terminal portuaria{% endblock %}</title>
   <link rel="stylesheet" href="/estatico/estilos.css">
 </head>
-<body{% if mqtt is defined and mqtt %} data-mqtt-ws="{{ mqtt.ws }}" data-mqtt-usuario="{{ mqtt.usuario }}" data-mqtt-contrasena="{{ mqtt.contrasena }}"{% endif %}>
+<body{% if usuario is defined and usuario %} data-rol="{{ usuario.rol.value }}"{% endif %}{% if mqtt is defined and mqtt %} data-mqtt-ws-puerto="{{ mqtt.ws_puerto }}" data-mqtt-usuario="{{ mqtt.usuario }}" data-mqtt-contrasena="{{ mqtt.contrasena }}"{% endif %}>
   <header class="cabecera">
     <span class="marca">PORTUS</span>
     {% if usuario is defined and usuario %}

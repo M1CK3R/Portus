@@ -1,19 +1,28 @@
 <section id="alarmas">
-  <label for="alarmas-filtro-severidad">Filtrar por severidad:</label>
-  <select id="alarmas-filtro-severidad">
-    <option value="">Todas</option>
-    <option value="CRITICA">Crítica</option>
-    <option value="ALTA">Alta</option>
-    <option value="MEDIA">Media</option>
-    <option value="BAJA">Baja</option>
-  </select>
-  <p>
-    <button id="alarmas-reconocer-todas" class="boton boton-chico">Reconocer todas (baja/media)</button>
-    <button id="alarmas-silenciar" class="boton boton-chico">Silenciar (AlarmaSilenciar)</button>
+  <div class="filtros">
+    <label for="alarmas-filtro-severidad">Severidad</label>
+    <select id="alarmas-filtro-severidad">
+      <option value="">Todas</option>
+      <option value="CRITICA">Crítica</option>
+      <option value="ALTA">Alta</option>
+      <option value="MEDIA">Media</option>
+      <option value="BAJA">Baja</option>
+    </select>
+    <button id="alarmas-reconocer-todas" class="boton boton-chico">Reconocer todas (baja y media)</button>
+    <button id="alarmas-silenciar" class="boton boton-chico">Silenciar señal sonora</button>
+  </div>
+  <p class="texto-ayuda">
+    Una alarma sigue activa hasta que se reconoce, aunque su causa haya cesado.
+    Silenciar acalla la sirena del controlador pero no reconoce ninguna alarma.
   </p>
+  <div id="alarmas-aviso"></div>
+  <div id="alarmas-error"></div>
   <h2>Activas</h2>
   <div id="alarmas-activas" class="lista-datos"></div>
   <h2>Históricas</h2>
   <div id="alarmas-historicas" class="lista-datos"></div>
-  <div id="alarmas-error"></div>
+  <details>
+    <summary>Catálogo AL01–AL14 (SPECS §13.1)</summary>
+    <div id="alarmas-catalogo" class="lista-datos"></div>
+  </details>
 </section>

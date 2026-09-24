@@ -32,7 +32,9 @@
     </div>
     <div class="elem" data-stale>
       <span class="etiqueta">Grúa</span>
-      <span id="op-grua-trabajo">en reposo</span>
+      <span id="op-grua-estado">—</span>
+      <span class="texto-ayuda">Posición: <span id="op-grua-posicion">—</span></span>
+      <span class="texto-ayuda">Trabajo: <span id="op-grua-trabajo">—</span></span>
     </div>
     <div class="elem" data-stale>
       <span class="etiqueta">Cola de grúa</span>
@@ -45,6 +47,7 @@
     <div class="elem" data-stale>
       <span class="etiqueta">Puerta de salida</span>
       <span id="op-puerta">cerrada</span>
+      <span class="texto-ayuda">Vehículo: <span id="op-puerta-vehiculo">—</span></span>
     </div>
     <div class="elem">
       <span class="etiqueta">Estado del enlace</span>
@@ -57,7 +60,7 @@
     </div>
     <div class="elem" data-stale>
       <span class="etiqueta">Turno actual</span>
-      <span id="op-turno-actual">—</span>
+      <button type="button" id="op-turno-actual" class="enlace-turno" disabled>—</button>
     </div>
     <div class="elem" data-stale>
       <span class="etiqueta">Alarmas activas</span>
@@ -66,6 +69,7 @@
   </div>
 
   <div class="detalle-posicion" id="op-detalle-patio"></div>
+  <div class="detalle" id="op-detalle-turno"></div>
 
   <h2>Comandos remotos (§6.3)</h2>
   <div class="comandos">
@@ -73,9 +77,8 @@
     <button class="boton" data-comando="AbrirPuertaSalida">Abrir puerta de salida</button>
     <button class="boton" data-comando="ModoMantenimiento">Modo mantenimiento</button>
     <button class="boton" data-comando="GruaSuspender">Suspender grúa</button>
-    <button class="boton" data-comando="GruaReanudar">Reanudar grúa</button>
-    <button class="boton" data-comando="GruaReferenciar">Referenciar grúa</button>
-    <button class="boton" data-comando="AgujaLiberar">Liberar parqueo</button>
+    <button class="boton" data-comando="GruaReanudar" disabled>Reanudar grúa</button>
+    <button class="boton" data-comando="GruaReferenciar" disabled>Referenciar grúa</button>
   </div>
   <h3>Comandos manuales (§6.3 [AMB])</h3>
   <div class="comandos">
@@ -83,5 +86,7 @@
     <button class="boton boton-chico" data-comando="AgujaRecta">Aguja recta</button>
     <button class="boton boton-chico" data-comando="AgujaParqueo">Aguja parqueo</button>
   </div>
-  <p class="texto-ayuda">Respuesta: <span id="op-cmd-respuesta">—</span></p>
+  <p class="texto-ayuda">«Liberar parqueo» está en cada plaza ocupada con retención resuelta.</p>
+  <h3>Respuestas del controlador (§6.2)</h3>
+  <ol id="op-cmd-respuestas" class="lista-respuestas"></ol>
 </section>

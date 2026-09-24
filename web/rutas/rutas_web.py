@@ -90,9 +90,11 @@ def panel(slug: str) -> Respuesta:
     if activa is None:
         return flask.abort(404)
     config = contexto().configuracion
-    host = config.mqtt_host or "127.0.0.1"
+    # Solo el puerto: el host lo pone el navegador con la dirección por la que
+    # llegó al SBC. MQTT_HOST (127.0.0.1) es el broker visto desde el servidor
+    # y en otro equipo de la red apuntaría al propio navegador (§19.3 paso 7).
     mqtt = {
-        "ws": f"ws://{host}:{config.mqtt_ws_puerto}/",
+        "ws_puerto": config.mqtt_ws_puerto,
         "usuario": config.mqtt_tablero_usuario,
         "contrasena": config.mqtt_tablero_contrasena,
     }

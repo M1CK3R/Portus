@@ -1,8 +1,23 @@
 // Pestaña Patio (SPECS §12.2): posiciones por nivel + tabla de inventario
 // (8 campos), Bloquear/Liberar, permanencia. Render con textContent (JS-3).
 
-import { crear, getJson, limpiar, mostrarError, postJson, texto } from "./utilidades.mjs";
+import { mostrarRespuesta } from "./causas_comando.mjs";
+import { ClienteMqtt } from "./mqtt.mjs";
+import {
+  crear,
+  credencialesMqtt,
+  getJson,
+  limpiar,
+  mostrarError,
+  postJson,
+  texto,
+  urlWs,
+} from "./utilidades.mjs";
 import { PERMANENCIA_EXCESIVA_HORAS } from "./config.mjs";
+
+// Eventos tras los que la foto del patio cambió: se recarga al recibirlos
+// (actualización por suscripción, nunca por temporizador; JS-2).
+const TIPOS_QUE_CAMBIAN_PATIO = new Set(["patio.estado", "patio.actualizado"]);
 
 export function iniciarPatio() {
   const raiz = document.getElementById("patio");
@@ -36,14 +51,50 @@ export function iniciarPatio() {
       celda.appendChild(crear("p", "", `Estado: ${pos.estado}`));
       celda.appendChild(crear("p", "", `N1: ${n1}`));
       celda.appendChild(crear("p", "", `N2: ${n2}`));
-      const bloquear = crear("button", "boton boton-chico", "Bloquear");
-      bloquear.addEventListener("click", () => postJson(`/api/patio/posiciones/${pos.id}/bloquear`).then(cargar).catch((e) => mostrarError(error, e.message)));
-      const liberar = crear("button", "boton boton-chico", "Liberar");
-      liberar.addEventListener("click", () => postJson(`/api/patio/posiciones/${pos.id}/liberar`).then(cargar).catch((e) => mostrarError(error, e.message)));
-      celda.appendChild(bloquear);
-      celda.appendChild(liberar);
+      // Bloquear solo una libre; Liberar solo una bloqueada (enunciado 4.4).
+      if (pos.estado === "libre") celda.appendChild(botonComando(pos.id, "bloquear", "Bloquear"));
+      if (pos.estado === "bloqueada") celda.appendChild(botonComando(pos.id, "liberar", "Liberar"));
       contPos.appendChild(celda);
     });
+  }
+
+  function botonComando(posicionId, accion, etiqueta) {
+    const boton = crear("button", "boton boton-chico", etiqueta);
+    boton.addEventListener("click", async () => {
+      try {
+        await postJson(`/api/patio/posiciones/${posicionId}/${accion}`, {});
+        // 202: el cambio se aplica cuando el controlador responde ACK (§6.2).
+        texto(error, `${etiqueta} ${posicionId}: enviado al controlador, esperando respuesta…`);
+      } catch (e) {
+        mostrarError(error, e.message);
+      }
+    });
+    return boton;
+  }
+
+  function aplicarMensaje(_topico, carga) {
+    let envoltorio;
+    try {
+      envoltorio = JSON.parse(carga);
+    } catch {
+      return;
+    }
+    if (envoltorio.tipo === "comando.respuesta" && envoltorio.datos?.nombre?.startsWith("Posicion")) {
+      mostrarRespuesta(error, envoltorio.datos);
+    }
+    if (TIPOS_QUE_CAMBIAN_PATIO.has(envoltorio.tipo)) cargar();
+  }
+
+  function suscribir() {
+    const cred = credencialesMqtt();
+    const cliente = new ClienteMqtt({
+      url: urlWs(),
+      usuario: cred.usuario,
+      contrasena: cred.contrasena,
+      alMensaje: aplicarMensaje,
+    });
+    cliente.iniciar();
+    window.addEventListener("beforeunload", () => cliente.detener());
   }
 
   function pintarInventario(filas) {
@@ -82,6 +133,7 @@ export function iniciarPatio() {
   }
 
   cargar();
+  suscribir();
 }
 
 function permanenciaHoras(iso) {
