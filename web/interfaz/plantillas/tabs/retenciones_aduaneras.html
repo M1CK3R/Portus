@@ -1,0 +1,24 @@
+<section id="retenciones_aduaneras">
+  <div class="filtros">
+    <label for="ra-filtro-causa">Causa</label>
+    <select id="ra-filtro-causa">
+      <option value="">RT03 y RT05</option>
+      <option value="RT03">RT03 · Canal rojo</option>
+      <option value="RT05">RT05 · Documental</option>
+    </select>
+    <label for="ra-filtro-estado">Estado</label>
+    <select id="ra-filtro-estado">
+      <option value="">Abiertas y resueltas</option>
+      <option value="abierta">Abiertas</option>
+      <option value="resuelta">Resueltas</option>
+    </select>
+  </div>
+  <p class="texto-ayuda">
+    Para retener un turno en curso (RT05) use el botón «Retener turno» en Consulta de carga.
+  </p>
+  <div id="ra-error"></div>
+  <h2>Abiertas</h2>
+  <div id="ra-abiertas" class="lista-datos"></div>
+  <h2>Resueltas</h2>
+  <div id="ra-resueltas" class="lista-datos"></div>
+</section>

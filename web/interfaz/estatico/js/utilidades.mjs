@@ -37,7 +37,7 @@ export async function getJson(url) {
     let detalle = "";
     try {
       const cuerpo = await resp.json();
-      detalle = cuerpo.mensaje || cuerpo.error || "";
+      detalle = cuerpo.error || cuerpo.mensaje || "";
     } catch {
       // respuesta sin JSON (p. ej. CSV); se ignora
     }
@@ -63,7 +63,7 @@ export async function postJson(url, cuerpo) {
     // respuesta sin cuerpo
   }
   if (!resp.ok) {
-    throw new Error(data?.mensaje || data?.error || `${resp.status}`);
+    throw new Error(data?.error || data?.mensaje || `${resp.status}`);
   }
   return data;
 }
@@ -76,15 +76,38 @@ export function mostrarError(contenedor, mensaje) {
   contenedor.appendChild(crear("p", "error", mensaje));
 }
 
-export function urlWs() {
-  // El broker WebSocket (mosquitto, §19.2). La web inyecta la URL completa en
-  // data-mqtt-ws (con host/puerto de config); sin ese atributo se arma con
-  // el hostname del navegador en el puerto 9001 por omisión (JS-4).
-  const override = document.body.dataset.mqttWs;
-  if (override) {
-    return override;
+export function tipoDeMensaje(carga) {
+  // «tipo» del envoltorio §5.2; un mensaje mal formado se ignora (P-5).
+  try {
+    return JSON.parse(carga)?.tipo || "";
+  } catch {
+    return "";
   }
-  return `ws://${window.location.hostname}:9001/`;
+}
+
+// Hora local de Guatemala: UTC−6 fijo, sin horario de verano (CODESTYLE I-8).
+const DESFASE_LOCAL_MS = -6 * 60 * 60 * 1000;
+
+export function fechaLocal(iso) {
+  // Marca ISO UTC del servidor → «dd/mm/aaaa HH:MM» local (I-8).
+  const ms = Date.parse(iso || "");
+  if (Number.isNaN(ms)) return "—";
+  const local = new Date(ms + DESFASE_LOCAL_MS);
+  const dos = (n) => String(n).padStart(2, "0");
+  return (
+    `${dos(local.getUTCDate())}/${dos(local.getUTCMonth() + 1)}/${local.getUTCFullYear()} ` +
+    `${dos(local.getUTCHours())}:${dos(local.getUTCMinutes())}`
+  );
+}
+
+const PUERTO_WS_POR_OMISION = "9001";
+
+export function urlWs() {
+  // El broker WebSocket vive en el mismo SBC que sirvió la página (§19.2):
+  // se usa el hostname con el que el navegador llegó, así funciona desde
+  // cualquier equipo de la red local. La web solo inyecta el puerto.
+  const puerto = document.body.dataset.mqttWsPuerto || PUERTO_WS_POR_OMISION;
+  return `ws://${window.location.hostname}:${puerto}/`;
 }
 
 export function credencialesMqtt() {

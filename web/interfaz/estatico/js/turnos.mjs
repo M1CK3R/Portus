@@ -1,7 +1,19 @@
 // Pestaña Turnos (SPECS §14.2): activos/históricos, filtros, línea de tiempo,
 // Retener (RT06) y Anular. Render con textContent (JS-3).
 
+import { ESTADOS_RETENIBLES } from "./config.mjs";
 import { crear, getJson, limpiar, mostrarError, postJson, texto } from "./utilidades.mjs";
+
+// §8.1: Anulado no sale de EnSalida ni de un final; un Retenido se anula con
+// Rechazar desde la bandeja (lo resuelve el rol facultado, §10.3).
+const ESTADOS_ANULABLES = new Set([
+  "Programado",
+  "EnGarita",
+  "EnPesajeEntrada",
+  "EnRuta",
+  "EnTransferencia",
+  "EnPesajeSalida",
+]);
 
 export function iniciarTurnos() {
   const raiz = document.getElementById("turnos");
@@ -46,12 +58,14 @@ export function iniciarTurnos() {
       const ver = crear("button", "boton boton-chico", "Detalle");
       ver.addEventListener("click", () => verDetalle(t.id));
       accion.appendChild(ver);
-      if (!["Cerrado", "Anulado"].includes(t.estado)) {
-        const ret = crear("button", "boton boton-chico", "Retener");
+      if (ESTADOS_RETENIBLES.has(t.estado)) {
+        const ret = crear("button", "boton boton-chico", "Retener (RT06)");
         ret.addEventListener("click", () => retener(t.id));
+        accion.appendChild(ret);
+      }
+      if (ESTADOS_ANULABLES.has(t.estado)) {
         const anu = crear("button", "boton boton-chico peligro", "Anular");
         anu.addEventListener("click", () => anular(t.id));
-        accion.appendChild(ret);
         accion.appendChild(anu);
       }
       fila.appendChild(accion);
@@ -92,7 +106,8 @@ export function iniciarTurnos() {
   }
 
   async function retener(id) {
-    const observacion = window.prompt("Observación (opcional):") || "";
+    const observacion = window.prompt(`Retención manual RT06 del turno ${id}. Observación (opcional):`);
+    if (observacion === null) return;
     try {
       await postJson(`/api/turnos/${id}/retener`, { observacion });
       cargar();
