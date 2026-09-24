@@ -73,15 +73,40 @@ def crear_aplicacion(
     repositorio_auditoria = RepositorioAuditoria(bd)
     repositorio_usuarios = RepositorioUsuarios(bd)
     repositorio_vinculos = RepositorioVinculos(bd)
+    repositorio_manifiestos = RepositorioManifiestos(bd)
     nucleo = crear_nucleo_logica(
         bd,
         publicador_logica if publicador_logica is not None else PublicadorSordo(),
         fabrica_instante,
         ConfiguracionLogica(politica_asignacion=configuracion.politica_asignacion),
     )
+    # Etapa 7: servicios de la cadena documental (NAVIERA/AGENTE/AUTORIDAD).
+    from web.repositorios.repositorio_declaraciones import RepositorioDeclaraciones
+    from web.repositorios.repositorio_inventario import RepositorioInventario
+    from web.repositorios.repositorio_levantes import RepositorioLevantes
+    from web.servicios.servicio_declaraciones import ServicioDeclaraciones
+    from web.servicios.servicio_levantes import ServicioLevantes
+    from web.servicios.servicio_manifiestos import ServicioManifiestos
+
+    repo_declaraciones = RepositorioDeclaraciones(bd)
+    repo_levantes = RepositorioLevantes(bd)
+    repo_inventario = RepositorioInventario(bd)
+    servicio_manifiestos = ServicioManifiestos(repositorio_manifiestos, fabrica_instante)
+    servicio_declaraciones = ServicioDeclaraciones(
+        repo_declaraciones, repositorio_manifiestos, repo_levantes, fabrica_instante
+    )
+    servicio_levantes = ServicioLevantes(
+        repo_levantes,
+        repositorio_manifiestos,
+        repo_declaraciones,
+        repo_inventario,
+        repositorio_usuarios,
+        nucleo.notificador,
+        fabrica_instante,
+    )
     contexto_web = ContextoWeb(
         usuarios=repositorio_usuarios,
-        manifiestos=RepositorioManifiestos(bd),
+        manifiestos=repositorio_manifiestos,
         vinculos=repositorio_vinculos,
         auditoria=repositorio_auditoria,
         servicio_auth=ServicioAuth(repositorio_usuarios),
@@ -90,6 +115,9 @@ def crear_aplicacion(
             usuarios=repositorio_usuarios,
             fabrica_instante=fabrica_instante,
         ),
+        servicio_manifiestos=servicio_manifiestos,
+        servicio_declaraciones=servicio_declaraciones,
+        servicio_levantes=servicio_levantes,
         nucleo=nucleo,
         configuracion=configuracion,
         reloj_epoch=reloj_epoch,

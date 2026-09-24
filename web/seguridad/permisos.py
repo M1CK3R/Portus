@@ -57,9 +57,9 @@ class Accion:
 #              (paneles de comandos/alarmas completan su lógica en 8-9)
 #   Etapa 7  · crear manifiesto, presentar declaración y solicitar levante,
 #              otorgar o retener levante, asignar canal de selectivo,
-#              consultar ubicación (NAVIERA/AGENTE/AUTORIDAD), Retener turno
-#              RT05 desde Consulta de carga (A9)
-#   Etapa 8  · retenciones operativa y aduanera completas con su pestaña
+#              consultar ubicación (NAVIERA/AGENTE/AUTORIDAD)
+#   Etapa 8  · retenciones operativa y aduanera completas con su pestaña;
+#              Retener turno RT05 desde Consulta de carga (A9)
 #   Etapa 9  · emitir comandos remotos, reconocer alarmas
 #   Etapa 10 · solicitar cita y consultar ubicación «solo los propios» de
 #              TRANSPORTISTA, vía el bot (§7.5.6: mismo control de propiedad)
@@ -134,6 +134,55 @@ ACCION_GENERAR_REPORTE = Accion(
     nombre="generar_reporte",
     roles_permitidos=frozenset({Rol.TERMINAL}),
     frase_rechazo="generar reportes de corrida",
+)
+
+# Etapa 7 · Cadena documental: NAVIERA, AGENTE, AUTORIDAD (§9, §14.7-§14.9).
+ACCION_CREAR_MANIFIESTO = Accion(
+    nombre="crear_manifiesto",
+    roles_permitidos=frozenset({Rol.NAVIERA}),
+    frase_rechazo="crear manifiestos",
+)
+ACCION_ANULAR_MANIFIESTO = Accion(
+    nombre="anular_manifiesto",
+    roles_permitidos=frozenset({Rol.NAVIERA}),
+    frase_rechazo="anular manifiestos",
+)
+ACCION_VER_CONTENEDORES_PROPIOS = Accion(
+    nombre="ver_contenedores_propios",
+    roles_permitidos=frozenset({Rol.NAVIERA}),
+    frase_rechazo="ver sus contenedores",
+)
+ACCION_PRESENTAR_DECLARACION = Accion(
+    nombre="presentar_declaracion",
+    roles_permitidos=frozenset({Rol.AGENTE}),
+    frase_rechazo="presentar declaraciones de mercancías",
+)
+ACCION_SOLICITAR_LEVANTE = Accion(
+    nombre="solicitar_levante",
+    roles_permitidos=frozenset({Rol.AGENTE}),
+    frase_rechazo="solicitar levantes",
+)
+ACCION_VER_SEGUIMIENTO = Accion(
+    nombre="ver_seguimiento",
+    roles_permitidos=frozenset({Rol.AGENTE}),
+    frase_rechazo="ver el seguimiento de sus solicitudes",
+)
+ACCION_OTORGAR_LEVANTE = Accion(
+    nombre="otorgar_levante",
+    roles_permitidos=frozenset({Rol.AUTORIDAD}),
+    frase_rechazo="otorgar o retener levantes",
+)
+ACCION_CONSULTAR_CARGA = Accion(
+    nombre="consultar_carga",
+    roles_permitidos=frozenset({Rol.AUTORIDAD}),
+    frase_rechazo="consultar la carga de cualquier contenedor",
+)
+
+# Etapa 8 · Retenciones y parqueo (§10.2, A9): RT05 la ordena solo la autoridad.
+ACCION_ORDENAR_RETENCION_DOCUMENTAL = Accion(
+    nombre="ordenar_retencion_documental",
+    roles_permitidos=frozenset({Rol.AUTORIDAD}),
+    frase_rechazo="ordenar retenciones documentales (RT05)",
 )
 
 CLAVE_CONTEXTO = "contexto_portus"

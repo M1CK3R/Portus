@@ -102,3 +102,40 @@ def test_transportista_no_accede_ni_a_la_web_ni_a_la_api(web):
     )
     assert respuesta.status_code == 403  # §7.1: sin interfaz web; P11 sin excepción
     assert cliente.get("/api/manifiestos").status_code == 401  # nunca tuvo sesión
+
+
+def test_naviera_no_abre_el_detalle_de_un_manifiesto_ajeno(web):
+    # §7.4 «solo los propios» también en el detalle: 403 explícito y auditado.
+    ids_por_contenedor = {
+        fila.contenedor_id: fila.id for fila in RepositorioManifiestos(web.bd).listar()
+    }
+    cliente = _cliente_como(web, "naviera02", CONTRASENA)
+
+    ajeno = cliente.get(f"/api/manifiestos/{ids_por_contenedor['C-A']}/detalle")
+    propio = cliente.get(f"/api/manifiestos/{ids_por_contenedor['C-C']}/detalle")
+
+    assert ajeno.status_code == 403
+    assert ajeno.get_json()["error"] == "ACCION_NO_PERMITIDA"
+    assert propio.status_code == 200
+    with web.bd.candado:
+        filas = web.bd.conexion.execute("SELECT motivo FROM auditoria_rechazo").fetchall()
+    assert "manifiesto_de_otra_naviera" in {str(fila[0]) for fila in filas}
+
+
+def test_terminal_abre_el_detalle_de_cualquier_manifiesto(web):
+    primero = RepositorioManifiestos(web.bd).listar()[0].id
+    cliente = _cliente_como(web, "terminal01", CONTRASENA)
+
+    assert cliente.get(f"/api/manifiestos/{primero}/detalle").status_code == 200
+
+
+def test_pagina_inyecta_solo_el_puerto_del_websocket(web):
+    # El host lo pone el navegador (location.hostname): con MQTT_HOST=127.0.0.1
+    # un equipo de la red apuntaría a sí mismo y el sinóptico quedaría muerto.
+    cliente = _cliente_como(web, "terminal01", CONTRASENA)
+
+    html = cliente.get("/pestanas/operacion").get_data(as_text=True)
+
+    assert 'data-mqtt-ws-puerto="9001"' in html
+    assert "ws://127.0.0.1" not in html
+    assert 'data-rol="TERMINAL"' in html

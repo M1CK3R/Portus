@@ -15,6 +15,9 @@ from web.repositorios.repositorio_usuarios import RepositorioUsuarios
 from web.repositorios.repositorio_vinculos import RepositorioVinculos
 from web.servicios.nucleo_logica import NucleoLogica
 from web.servicios.servicio_auth import ServicioAuth
+from web.servicios.servicio_declaraciones import ServicioDeclaraciones
+from web.servicios.servicio_levantes import ServicioLevantes
+from web.servicios.servicio_manifiestos import ServicioManifiestos
 from web.servicios.servicio_vinculacion import ServicioVinculacion
 
 
@@ -28,6 +31,9 @@ class ContextoWeb:
     auditoria: RepositorioAuditoria
     servicio_auth: ServicioAuth
     servicio_vinculacion: ServicioVinculacion
+    servicio_manifiestos: ServicioManifiestos
+    servicio_declaraciones: ServicioDeclaraciones
+    servicio_levantes: ServicioLevantes
     nucleo: NucleoLogica
     configuracion: ConfiguracionWeb
     reloj_epoch: Callable[[], float]
