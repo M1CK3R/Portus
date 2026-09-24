@@ -125,12 +125,38 @@ class RepositorioTrabajos:
             ).fetchone()
         return _trabajo_de_fila(fila) if fila is not None else None
 
-    def marcar_en_curso(self, trabajo_id: int) -> None:
+    def marcar_en_curso(self, trabajo_id: int, ts: str) -> None:
+        """El JOB salió hacia el controlador: el ciclo de grúa empieza aquí (§12.6)."""
         with self._bd.candado:
             self._bd.conexion.execute(
                 "UPDATE trabajo_grua SET estado = 'EN_CURSO' WHERE id = ?", (trabajo_id,)
             )
+            self._bd.conexion.execute(
+                "INSERT INTO inicio_trabajo_grua (trabajo_id, ts) VALUES (?, ?) "
+                "ON CONFLICT (trabajo_id) DO UPDATE SET ts = excluded.ts",
+                (trabajo_id, ts),
+            )
             self._bd.conexion.commit()
+
+    def inicio_de(self, trabajo_id: int) -> str | None:
+        """Instante en que el trabajo se envió por última vez (None si nunca salió)."""
+        with self._bd.candado:
+            fila = self._bd.conexion.execute(
+                "SELECT ts FROM inicio_trabajo_grua WHERE trabajo_id = ?", (trabajo_id,)
+            ).fetchone()
+        return None if fila is None else str(fila[0])
+
+    def ultimo_extremo_de_grua(self) -> str | None:
+        """Dónde quedó la grúa: destino del último ciclo completado u origen si abortó."""
+        with self._bd.candado:
+            fila = self._bd.conexion.execute(
+                "SELECT trabajo_grua.origen, trabajo_grua.destino, ciclo_grua.resultado "
+                "FROM ciclo_grua JOIN trabajo_grua ON trabajo_grua.id = ciclo_grua.trabajo_id "
+                "ORDER BY ciclo_grua.id DESC LIMIT 1"
+            ).fetchone()
+        if fila is None:
+            return None
+        return str(fila[1]) if str(fila[2]) == ResultadoCiclo.COMPLETADO.value else str(fila[0])
 
     def completar(self, trabajo_id: int) -> None:
         with self._bd.candado:
@@ -146,6 +172,32 @@ class RepositorioTrabajos:
                 "UPDATE trabajo_grua SET estado = 'PENDIENTE' WHERE id = ?", (trabajo_id,)
             )
             self._bd.conexion.commit()
+
+    def cancelar_pendientes(self, turno_id: int) -> list[Trabajo]:
+        """Pasa a ABORTADO los PENDIENTE del turno anulado y los devuelve (§12.3).
+
+        El EN_CURSO no se toca: la grúa ya se mueve y su confirmación física
+        (GRU/PAT) es la que actualiza el inventario.
+        """
+        with self._bd.candado:
+            conexion = self._bd.conexion
+            conexion.execute("BEGIN IMMEDIATE")
+            try:
+                filas = conexion.execute(
+                    f"SELECT {COLUMNAS_TRABAJO} FROM trabajo_grua "
+                    "WHERE turno_id = ? AND estado = 'PENDIENTE' ORDER BY orden",
+                    (turno_id,),
+                ).fetchall()
+                conexion.execute(
+                    "UPDATE trabajo_grua SET estado = 'ABORTADO' "
+                    "WHERE turno_id = ? AND estado = 'PENDIENTE'",
+                    (turno_id,),
+                )
+                conexion.commit()
+            except Exception:
+                conexion.rollback()
+                raise
+        return [_trabajo_de_fila(fila) for fila in filas]
 
     def quedan_pendientes(self, turno_id: int) -> bool:
         """True si el turno aún tiene trabajos PENDIENTE o EN_CURSO (§12.5)."""

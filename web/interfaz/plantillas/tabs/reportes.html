@@ -1,11 +1,14 @@
 <section id="reportes">
+  <h2>Reporte de corrida (§16.3)</h2>
   <label for="reportes-etiqueta">Etiqueta de corrida:</label>
-  <input id="reportes-etiqueta" type="text" placeholder="corrida de evaluación">
-  <label for="reportes-inicio">Desde:</label>
+  <input id="reportes-etiqueta" type="text" maxlength="80" placeholder="corrida de evaluación">
+  <label for="reportes-inicio">Desde (hora de la terminal):</label>
   <input id="reportes-inicio" type="datetime-local">
-  <label for="reportes-fin">Hasta:</label>
+  <label for="reportes-fin">Hasta (hora de la terminal):</label>
   <input id="reportes-fin" type="datetime-local">
   <button id="reportes-generar" class="boton">Generar</button>
-  <div id="reportes-resultado" class="detalle"></div>
   <div id="reportes-error"></div>
+  <div id="reportes-resultado" class="detalle"></div>
+  <h2>Reportes guardados</h2>
+  <div id="reportes-guardados" class="lista-datos"></div>
 </section>

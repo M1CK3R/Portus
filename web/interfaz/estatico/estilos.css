@@ -138,6 +138,7 @@ button:hover { filter: brightness(1.08); }
 }
 
 .texto-ayuda { color: #5a655e; font-size: 0.92rem; }
+.aviso-ok { color: var(--color-acento); font-weight: 600; }
 
 /* ===== Etapa 6 · TERMINAL (§14) ===== */
 
@@ -212,6 +213,8 @@ button:hover { filter: brightness(1.08); }
 .tabla-datos thead { background: #10241b; color: #f2f5f2; }
 .tabla-datos tbody tr:nth-child(even) { background: #f7f8f6; }
 .tabla-datos tr.excesivo { background: #fff4d6; }
+.tabla-datos tr.excedida { background: #fbeae8; }
+.tabla-datos td button + button { margin-left: 0.3rem; }
 .tabla-datos tr.sev-critica { background: #fbeae8; }
 .tabla-datos tr.sev-alta { background: #fff3e8; }
 .tabla-datos tr.sev-media { background: #fff9e8; }
@@ -221,6 +224,8 @@ button:hover { filter: brightness(1.08); }
 
 .comandos { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0.5rem 0; }
 .boton-chico { padding: 0.25rem 0.55rem; font-size: 0.8rem; }
+.filtros { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 0.8rem; }
+.filtros label { margin-top: 0; }
 .boton.peligro { background: var(--color-error); }
 
 .franjas { display: grid; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); gap: 0.6rem; margin-top: 0.5rem; }
@@ -230,6 +235,10 @@ button:hover { filter: brightness(1.08); }
 .lista-citas { list-style: none; padding: 0; margin: 0.3rem 0; display: flex; flex-direction: column; gap: 0.2rem; }
 .lista-citas li { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; font-size: 0.85rem; }
 .etiqueta-bloqueada { color: var(--color-error); font-weight: 700; font-size: 0.75rem; }
+.fila-formulario { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin: 0.4rem 0; }
+.estado-cita { font-size: 0.75rem; padding: 0 0.35rem; border-radius: var(--radio); background: #eef1ef; }
+.estado-cita.estado-cumplida { background: #e3f3e6; }
+.estado-cita.estado-vencida, .estado-cita.estado-cancelada { background: #fbeae8; }
 
 .indicador-dia { margin: 0.5rem 0; padding: 0.4rem 0.7rem; background: var(--color-acento-suave); border-radius: var(--radio); font-weight: 600; }
 
@@ -239,3 +248,4 @@ button:hover { filter: brightness(1.08); }
   .elem.parqueo, .elem.posiciones { grid-column: span 1; }
   .panel-sinoptico { grid-template-columns: 1fr; }
 }
+.acciones-reporte { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem; }

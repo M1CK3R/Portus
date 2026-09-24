@@ -22,6 +22,7 @@ from web.configuracion.configuracion_logica import ConfiguracionLogica
 from web.modelos.garita import DecisionGarita
 from web.repositorios.conexion_bd import ConexionBd
 from web.repositorios.repositorio_alarmas import RepositorioAlarmas
+from web.repositorios.repositorio_ciclo_cita import RepositorioCicloCita
 from web.repositorios.repositorio_citas import RepositorioCitas
 from web.repositorios.repositorio_intentos import RepositorioIntentos
 from web.repositorios.repositorio_inventario import RepositorioInventario
@@ -36,6 +37,10 @@ from web.repositorios.repositorio_telemetria import RepositorioTelemetria
 from web.repositorios.repositorio_trabajos import RepositorioTrabajos
 from web.repositorios.repositorio_turnos import FilaTurno, ListadoTurnos, RepositorioTurnos
 from web.repositorios.repositorio_vehiculos import RepositorioVehiculos
+from web.servicios.avisos_retencion import AvisosRetencion
+from web.servicios.emisor_alarmas import EmisorAlarmas
+from web.servicios.muestreo_espera import MuestreoFilaEspera
+from web.servicios.notificador import Notificador
 from web.servicios.politica_asignacion import crear_politica
 from web.servicios.puertos import PublicadorLogica
 from web.servicios.servicio_alarmas import ServicioAlarmas
@@ -43,6 +48,7 @@ from web.servicios.servicio_citas import ServicioCitas
 from web.servicios.servicio_comandos import ServicioComandos
 from web.servicios.servicio_garita import ServicioGarita
 from web.servicios.servicio_grua import ServicioGrua
+from web.servicios.servicio_parqueo import ServicioParqueo
 from web.servicios.servicio_patio import ServicioPatio
 from web.servicios.servicio_pesajes import ServicioPesajes
 from web.servicios.servicio_reportes import ServicioReportes
@@ -50,6 +56,8 @@ from web.servicios.servicio_retenciones import ServicioRetenciones
 from web.servicios.servicio_salida import ServicioSalida
 from web.servicios.servicio_trabajos import ServicioTrabajos
 from web.servicios.servicio_turnos import ServicioTurnos
+from web.servicios.vigilante_permanencia import VigilantePermanencia
+from web.servicios.vigilante_retenciones import VigilanteRetenciones
 from web.tiempo import marca_utc
 
 REGISTRO = logging.getLogger(__name__)
@@ -64,6 +72,11 @@ TIPO_EVENTO_PATIO = "patio.cambio"
 TIPO_EVENTO_SALIDA = "salida.verificacion"
 TIPO_EVENTO_COMANDO_RESPUESTA = "comando.respuesta"
 TIPO_EVENTO_ENLACE_ESTADO = "enlace.estado"
+TIPO_EVENTO_LATIDO = "estado.latido"
+TIPO_EVENTO_ALARMA_CONTROLADOR = "alarma.controlador"
+TIPO_EVENTO_ALARMA_SERVIDOR = "alarma.servidor"
+TIPOS_ALARMA_RECONCILIABLES = (TIPO_EVENTO_ALARMA_CONTROLADOR, TIPO_EVENTO_ALARMA_SERVIDOR)
+"""Alarmas que el puente persistió en ``evento`` y la web pudo perderse caída (§3.3)."""
 
 POSICIONES_POR_OMISION = ("P1", "P2", "P3", "P4")
 """Semilla por omisión del patio lineal; el catálogo real vive en la BD (§19.3)."""
@@ -116,6 +129,25 @@ class NucleoLogica:
         return self._s.salida
 
     @property
+    def parqueo_svc(self) -> ServicioParqueo:
+        """Plazas del ramal: estado para el sinóptico y «Liberar parqueo» (§6.3, §14.1)."""
+        return self._s.parqueo_svc
+
+    @property
+    def trabajos_svc(self) -> ServicioTrabajos:
+        return self._s.trabajos_svc
+
+    @property
+    def vigilante_retenciones(self) -> VigilanteRetenciones:
+        """AL12 de la tarea periódica del proceso web (§13.1)."""
+        return self._s.vigilante_retenciones
+
+    @property
+    def vigilante_permanencia(self) -> VigilantePermanencia:
+        """AL13 de la tarea periódica del proceso web (§12.2, §13.1)."""
+        return self._s.vigilante_permanencia
+
+    @property
     def garita(self) -> ServicioGarita:
         return self._s.garita
 
@@ -130,6 +162,10 @@ class NucleoLogica:
     @property
     def citas_svc(self) -> ServicioCitas:
         return self._s.citas_svc
+
+    @property
+    def notificador(self) -> Notificador:
+        return self._s.notificador
 
     @property
     def grua_svc(self) -> ServicioGrua:
@@ -209,7 +245,6 @@ class NucleoLogica:
             str(datos.get("contenedor", "")),
             seq,
             ts,
-            distancia=_entero(datos.get("distancia")),
         )
 
     def _evento_patio(self, datos: dict[str, object], seq: int | None, ts: str) -> None:
@@ -243,6 +278,53 @@ class NucleoLogica:
         self._atender_estado_enlace(datos)
         _ = (seq, ts)
 
+    def _evento_latido(self, datos: dict[str, object], seq: int | None, ts: str) -> None:
+        """El latido EST alimenta la disponibilidad de comandos (§6.3) y la métrica 6 (A15)."""
+        self._s.comandos_svc.actualizar_estado(
+            str(datos.get("modo", "")), str(datos.get("grua", "")), ts
+        )
+        self._s.muestreo_espera.registrar(datos.get("vehiculos_en_espera"), ts)
+        _ = seq
+
+    def _evento_alarma_controlador(
+        self, datos: dict[str, object], seq: int | None, ts: str
+    ) -> None:
+        self._s.alarmas_svc.procesar_alarma_controlador(datos, ts)
+        _ = seq
+
+    def _evento_alarma_servidor(self, datos: dict[str, object], seq: int | None, ts: str) -> None:
+        self._s.alarmas_svc.procesar_alarma_enlace(datos, ts)
+        _ = seq
+
+    def reconciliar_alarmas(self, desde_ts: str) -> int:
+        """Aplica las alarmas que el puente persistió mientras la web no escuchaba.
+
+        E14: si la web arranca después que el puente, la AL01 retroactiva y
+        los ``ALM`` del controlador ya pasaron por MQTT; el puente los guardó
+        en ``evento`` y aquí se reinyectan. La deduplicación por ``id`` (P-4)
+        descarta los que la web sí había atendido. Devuelve cuántos aplicó.
+        """
+        with self._s.bd.candado:
+            filas = self._s.bd.conexion.execute(
+                "SELECT id, ts, origen, tipo, seq, datos, topico FROM evento "
+                "WHERE tipo IN (?, ?) AND ts >= ? ORDER BY ts",
+                (*TIPOS_ALARMA_RECONCILIABLES, desde_ts),
+            ).fetchall()
+        aplicados_antes = self.contadores.eventos_aplicados
+        for fila in filas:
+            envoltorio = {
+                "id": fila[0],
+                "ts": fila[1],
+                "origen": fila[2],
+                "tipo": fila[3],
+                "seq": fila[4],
+                "datos": json.loads(str(fila[5])),
+            }
+            self.atender_mensaje(str(fila[6]), json.dumps(envoltorio).encode("utf-8"))
+        aplicados = self.contadores.eventos_aplicados - aplicados_antes
+        REGISTRO.info("Reconciliación de alarmas desde %s: %d aplicadas", desde_ts, aplicados)
+        return aplicados
+
     # ------------------------------------------------------------publicación
 
     def publicar_autorizacion(self, decision: DecisionGarita) -> None:
@@ -271,28 +353,22 @@ class NucleoLogica:
         _ = decision
 
     def _atender_respuesta_comando(self, datos: dict[str, object]) -> None:
-        """NAK del controlador → AL14 persistida y publicada (§13.1, §13.4)."""
+        """ACK aplica bloqueos y liberaciones pendientes; NAK → AL14 persistida (§6.2, §13.1).
+
+        El estado de la BD sigue al controlador: patio y plazas solo cambian
+        cuando este acepta el comando (penalización §23.3 si se ejecuta pese
+        a su condición de rechazo).
+        """
         estado = str(datos.get("estado", ""))
+        sintetica = bool(datos.get("sintetica", False))
+        cmd_id = _texto(datos.get("cmd_id")) or ""
+        self._s.patio.aplicar_respuesta_comando(cmd_id, estado, sintetica)
+        self._s.parqueo_svc.aplicar_respuesta_comando(cmd_id, estado, sintetica)
         if estado != "NAK":
             return
-        sintetica = bool(datos.get("sintetica", False))
-        causa = _texto(datos.get("causa"))
-        if sintetica:
-            # El NAK SIN_RESPUESTA del puente no fue rechazo del controlador.
-            REGISTRO.warning("Comando sin respuesta (NAK sintético, causa=%s)", causa)
-            return
-        ts = marca_utc(self._s.fabrica_instante())
-        contenido: dict[str, object] = {
-            "cmd_id": _texto(datos.get("cmd_id")),
-            "nombre": _texto(datos.get("nombre")),
-            "causa": causa,
-        }
-        self._s.alarmas.registrar(
-            "AL14", "BAJA", "servidor", "Comando remoto rechazado por el controlador", contenido, ts
-        )
-        self._s.publicador.publicar(
-            "portus/srv/alarma", "alarma.servidor", {"codigo": "AL14", **contenido}
-        )
+        # §6.2 regla 2 y §4.5: todo rechazo, también el sintético SIN_RESPUESTA
+        # del puente (comando fallido), genera AL14 con la causa exacta.
+        self._s.alarmas_svc.procesar_comando_rechazado(datos)
 
     def _atender_estado_enlace(self, datos: dict[str, object]) -> None:
         """Reconciliación §3.3: al restablecerse el enlace se anota el resumen en la bitácora."""
@@ -349,12 +425,16 @@ class ServiciosLogica:
     retenciones: RepositorioRetenciones
     trabajos: RepositorioTrabajos
     alarmas: RepositorioAlarmas
+    emisor_alarmas: EmisorAlarmas
     notificaciones: RepositorioNotificaciones
+    notificador: Notificador
     telemetria: RepositorioTelemetria
+    muestreo_espera: MuestreoFilaEspera
     reportes_repo: RepositorioReportes
     maquina: ServicioTurnos
     garita: ServicioGarita
     retenciones_svc: ServicioRetenciones
+    parqueo_svc: ServicioParqueo
     trabajos_svc: ServicioTrabajos
     patio: ServicioPatio
     pesajes_svc: ServicioPesajes
@@ -365,6 +445,8 @@ class ServiciosLogica:
     grua_svc: ServicioGrua
     reportes_svc: ServicioReportes
     comandos_svc: ServicioComandos
+    vigilante_retenciones: VigilanteRetenciones
+    vigilante_permanencia: VigilantePermanencia
 
 
 def crear(
@@ -380,6 +462,7 @@ def crear(
     vehiculos = RepositorioVehiculos(bd)
     levantes = RepositorioLevantes(bd)
     citas = RepositorioCitas(bd)
+    ciclo_citas = RepositorioCicloCita(bd)
     plazas = RepositorioPlazas(bd)
     intentos = RepositorioIntentos(bd)
     inventario = RepositorioInventario(bd)
@@ -390,18 +473,10 @@ def crear(
     alarmas = RepositorioAlarmas(bd)
     notificaciones = RepositorioNotificaciones(bd)
     telemetria = RepositorioTelemetria(bd)
-    maquina = ServicioTurnos(turnos_repo, manifiestos, citas, publicador, fabrica_instante)
-    retenciones_svc = ServicioRetenciones(
-        retenciones,
-        plazas,
-        vehiculos,
-        manifiestos,
-        turnos_repo,
-        alarmas,
-        notificaciones,
-        maquina,
-        publicador,
-        fabrica_instante,
+    emisor = EmisorAlarmas(alarmas, publicador, fabrica_instante)
+    notificador = Notificador(notificaciones, publicador, fabrica_instante)
+    maquina = ServicioTurnos(
+        turnos_repo, manifiestos, citas, ciclo_citas, publicador, fabrica_instante
     )
     politica = crear_politica(config.politica_asignacion)
     trabajos_svc = ServicioTrabajos(
@@ -413,6 +488,31 @@ def crear(
         politica,
         _posiciones_de_bd(bd),
         publicador,
+        fabrica_instante,
+    )
+    salida = ServicioSalida(
+        vehiculos,
+        turnos_repo,
+        manifiestos,
+        citas,
+        notificador,
+        emisor,
+        maquina,
+        trabajos_svc,
+        publicador,
+        fabrica_instante,
+    )
+    avisos = AvisosRetencion(vehiculos, manifiestos, notificador, publicador)
+    parqueo_svc = ServicioParqueo(plazas, retenciones, emisor, avisos, publicador)
+    retenciones_svc = ServicioRetenciones(
+        retenciones,
+        manifiestos,
+        turnos_repo,
+        maquina,
+        salida,
+        parqueo_svc,
+        avisos,
+        fabrica_instante,
     )
     patio = ServicioPatio(inventario, publicador)
     pesajes_svc = ServicioPesajes(
@@ -424,18 +524,7 @@ def crear(
         retenciones_svc,
         publicador,
         fabrica_instante,
-        alarmas,
-    )
-    salida = ServicioSalida(
-        vehiculos,
-        turnos_repo,
-        manifiestos,
-        citas,
-        notificaciones,
-        alarmas,
-        maquina,
-        publicador,
-        fabrica_instante,
+        emisor,
     )
     listado = ListadoTurnos(bd)
     garita = ServicioGarita(
@@ -443,6 +532,7 @@ def crear(
         manifiestos,
         levantes,
         citas,
+        ciclo_citas,
         plazas,
         intentos,
         inventario,
@@ -451,17 +541,19 @@ def crear(
         trabajos_svc,
         publicador,
         fabrica_instante,
-        alarmas,
+        emisor,
     )
     reportes_repo = RepositorioReportes(bd)
-    alarmas_svc = ServicioAlarmas(alarmas, publicador, fabrica_instante)
-    citas_svc = ServicioCitas(citas, notificaciones, publicador, fabrica_instante)
+    alarmas_svc = ServicioAlarmas(alarmas, emisor, publicador, fabrica_instante)
+    citas_svc = ServicioCitas(
+        citas, ciclo_citas, manifiestos, notificador, publicador, fabrica_instante
+    )
     grua_svc = ServicioGrua(trabajos, alarmas, publicador, fabrica_instante)
     reportes_svc = ServicioReportes(
         turnos_repo,
         retenciones,
         trabajos,
-        citas,
+        ciclo_citas,
         telemetria,
         reportes_repo,
         config.politica_asignacion,
@@ -484,12 +576,16 @@ def crear(
         retenciones=retenciones,
         trabajos=trabajos,
         alarmas=alarmas,
+        emisor_alarmas=emisor,
         notificaciones=notificaciones,
+        notificador=notificador,
         telemetria=telemetria,
+        muestreo_espera=MuestreoFilaEspera(telemetria),
         reportes_repo=reportes_repo,
         maquina=maquina,
         garita=garita,
         retenciones_svc=retenciones_svc,
+        parqueo_svc=parqueo_svc,
         trabajos_svc=trabajos_svc,
         patio=patio,
         pesajes_svc=pesajes_svc,
@@ -500,6 +596,8 @@ def crear(
         grua_svc=grua_svc,
         reportes_svc=reportes_svc,
         comandos_svc=comandos_svc,
+        vigilante_retenciones=VigilanteRetenciones(retenciones, alarmas, emisor, fabrica_instante),
+        vigilante_permanencia=VigilantePermanencia(inventario, alarmas, emisor, fabrica_instante),
     )
     return NucleoLogica(servicios, _posiciones_de_bd(bd), fabrica_cmd_id or _uuid_aleatorio)
 
@@ -516,6 +614,9 @@ _DESPACHO_EVENTOS: dict[str, Callable[[NucleoLogica, dict[str, object], int | No
     TIPO_EVENTO_SALIDA: NucleoLogica._evento_salida,
     TIPO_EVENTO_COMANDO_RESPUESTA: NucleoLogica._evento_respuesta_comando,
     TIPO_EVENTO_ENLACE_ESTADO: NucleoLogica._evento_estado_enlace,
+    TIPO_EVENTO_LATIDO: NucleoLogica._evento_latido,
+    TIPO_EVENTO_ALARMA_CONTROLADOR: NucleoLogica._evento_alarma_controlador,
+    TIPO_EVENTO_ALARMA_SERVIDOR: NucleoLogica._evento_alarma_servidor,
 }
 
 

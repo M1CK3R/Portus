@@ -1,7 +1,8 @@
 -- esquema.sql PORTUS — regenerado a partir de db/migraciones/ (CODESTYLE BD-2).
--- NO editar a mano: se regenera con scripts/regenerar_esquema.py.
--- Migraciones incluidas: 001_tablas_del_puente.sql, 002_tablas_web.sql,
---   003_tablas_del_turno.sql, 004_tablas_de_etapa6.sql
+-- NO editar a mano: se regenera con `python -m herramientas.regenerar_esquema`.
+-- Migraciones incluidas: 001_tablas_del_puente.sql, 002_tablas_web.sql, 003_tablas_del_turno.sql,
+--   004_tablas_de_etapa6.sql, 005_tablas_de_etapa7.sql, 006_alertas_periodicas.sql,
+--   007_canal_de_mensajeria.sql, 008_inicio_de_trabajos_grua.sql
 
 -- ============================================================================
 -- 001_tablas_del_puente.sql
@@ -521,6 +522,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS ix_manifiesto_pendiente_por_contenedor
 
 CREATE INDEX IF NOT EXISTS ix_manifiesto_naviera ON manifiesto (naviera_id);
 -- Justificación: el filtro de propiedad de NAVIERA (§7.5.2) consulta por su id.
+
+-- ============================================================================
+-- 004_tablas_de_etapa6.sql
+-- ============================================================================
 -- 004_tablas_de_etapa6.sql — Etapa 6: interfaz del rol TERMINAL (SPECS §14).
 -- Ciclo de grúa registrado (§12.6: ts_inicio, ts_fin, tipo, distancia_traslacion,
 -- resultado, turno_id) y reporte de corrida (§16.3 [PROP]: etiqueta, rango,
@@ -563,3 +568,108 @@ CREATE TABLE IF NOT EXISTS reporte (
 
 CREATE INDEX IF NOT EXISTS ix_reporte_ts ON reporte (generado_en);
 -- Justificación: la pestaña Reportes lista los generados ordenados por fecha.
+
+-- ============================================================================
+-- 005_tablas_de_etapa7.sql
+-- ============================================================================
+-- 005_tablas_de_etapa7.sql — Etapa 7: cadena documental (SPECS §9, §14.7-§14.9).
+-- Tabla de declaraciones de mercancías del AGENTE (§9.3): número único,
+-- régimen, descripción ≥ 10, valor > 0, ligada al manifiesto y al agente.
+-- Idempotente (CREATE TABLE IF NOT EXISTS) para correr en cada arranque (BD-2).
+
+CREATE TABLE IF NOT EXISTS declaracion (
+    id INTEGER PRIMARY KEY,
+    manifiesto_id INTEGER NOT NULL REFERENCES manifiesto (id),
+    agente_id INTEGER NOT NULL REFERENCES usuario (id),
+    -- Número único de la declaración (§9.3: "único en el sistema").
+    numero TEXT NOT NULL UNIQUE,
+    -- Régimen exacto del SPECS §9.3.
+    regimen TEXT NOT NULL CHECK (regimen IN ('IMPORTACION_DEFINITIVA', 'DEPOSITO_TEMPORAL')),
+    descripcion TEXT NOT NULL CHECK (length(descripcion) >= 10),
+    valor INTEGER NOT NULL CHECK (valor > 0),
+    presentada_en TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS ix_declaracion_manifiesto ON declaracion (manifiesto_id);
+-- Justificación: el AGENTE y la AUTORIDAD consultan la declaración por manifiesto.
+
+CREATE INDEX IF NOT EXISTS ix_declaracion_agente ON declaracion (agente_id);
+-- Justificación: la pestaña Seguimiento lista las del agente en sesión.
+
+-- ============================================================================
+-- 006_alertas_periodicas.sql
+-- ============================================================================
+-- 006_alertas_periodicas.sql — Etapas 8 y 9: alarmas de las tareas periódicas (SPECS §13.1).
+-- AL12 (retención > 30 min) y AL13 (permanencia > 2 h) se generan una sola vez
+-- por objeto vigilado aunque la web se reinicie: la clave es el id de la
+-- retención (AL12) o «contenedor|ingreso_en» (AL13, un reingreso vuelve a
+-- vigilarse). La alarma misma se deduplica por código y origen (§13.4 [DEC]).
+-- Idempotente (CREATE TABLE IF NOT EXISTS) para correr en cada arranque (BD-2).
+
+CREATE TABLE IF NOT EXISTS alerta_emitida (
+    codigo TEXT NOT NULL CHECK (codigo IN ('AL12', 'AL13')),
+    clave TEXT NOT NULL,
+    alarma_id INTEGER NOT NULL REFERENCES alarma (id),
+    ts TEXT NOT NULL,
+    PRIMARY KEY (codigo, clave)
+);
+
+-- ============================================================================
+-- 007_canal_de_mensajeria.sql
+-- ============================================================================
+-- 007_canal_de_mensajeria.sql — Etapa 10: bot de Telegram del transportista (SPECS §15, §17.1).
+-- Vínculo chat ↔ transportista (§15.4), estado de entrega de cada notificación
+-- (§15.4 «entregado y reintentos») y marca del recordatorio de 1 h (§11.5).
+-- Las columnas nuevas viven en tablas propias porque el esquema se aplica en
+-- cada arranque y SQLite no tiene ALTER TABLE ... ADD COLUMN IF NOT EXISTS.
+-- Idempotente (CREATE TABLE IF NOT EXISTS) para correr en cada arranque (BD-2).
+
+CREATE TABLE IF NOT EXISTS vinculo_mensajeria (
+    -- Un transportista tiene a lo sumo una cuenta y una cuenta pertenece a un
+    -- solo transportista: volver a vincular reemplaza el vínculo anterior.
+    transportista_id INTEGER PRIMARY KEY REFERENCES usuario (id),
+    -- chat_id de Telegram: entero de hasta 64 bits (§15.4).
+    telegram_chat_id INTEGER NOT NULL UNIQUE,
+    vinculado_en TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS entrega_notificacion (
+    -- Reintentos del envío por Telegram. ``notificacion.entregado`` sigue
+    -- siendo la marca oficial; aquí queda el historial del intento.
+    notificacion_id INTEGER PRIMARY KEY REFERENCES notificacion (id),
+    reintentos INTEGER NOT NULL DEFAULT 0 CHECK (reintentos >= 0),
+    ultimo_error TEXT,
+    entregado_en TEXT
+);
+
+CREATE INDEX IF NOT EXISTS ix_notificacion_pendiente_ts ON notificacion (entregado, ts);
+-- Justificación: el barrido del bot busca las pendientes posteriores al
+-- vínculo del transportista para reenviarlas al volver la conexión (§15.4).
+
+CREATE TABLE IF NOT EXISTS recordatorio_cita (
+    -- Un recordatorio por cita y ventana. Reprogramar borra la fila para que
+    -- la ventana nueva tenga su propio aviso (§11.4, §11.5).
+    cita_id INTEGER PRIMARY KEY REFERENCES cita (id),
+    notificacion_id INTEGER NOT NULL REFERENCES notificacion (id),
+    ts TEXT NOT NULL
+);
+
+-- ============================================================================
+-- 008_inicio_de_trabajos_grua.sql
+-- ============================================================================
+-- 008_inicio_de_trabajos_grua.sql — Etapa 12: datos de las métricas de §16.1.
+-- Instante real de inicio de cada trabajo de grúa (métricas 1-3, gráfica §12.6).
+-- El ciclo de grúa (§12.6) dura desde que el JOB se envía al controlador hasta
+-- su FIN o ABORTO; ``trabajo_grua.creado_en`` es la hora en que se planificó
+-- (al autorizar en garita), que puede ser muy anterior. Reenviar tras un
+-- aborto reemplaza la marca: el ciclo nuevo empieza con el reenvío.
+-- Tabla aparte porque el esquema se aplica en cada arranque (sin ALTER, BD-2).
+
+CREATE TABLE IF NOT EXISTS inicio_trabajo_grua (
+    trabajo_id INTEGER PRIMARY KEY REFERENCES trabajo_grua (id),
+    ts TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS ix_telemetria_tipo_ts ON telemetria (tipo, ts);
+-- Justificación: la métrica 6 busca las muestras ``fila_espera`` del periodo y
+-- la última anterior a su inicio (§16.1, A15); el latido llena la tabla.

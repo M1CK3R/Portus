@@ -27,16 +27,21 @@ class RepositorioTelemetria:
             self._bd.conexion.commit()
 
     def max_fila_espera_en_rango(self, inicio: str, fin: str) -> int:
-        """Longitud máxima de la fila de espera en el rango (§16.1 métrica 6).
+        """Longitud máxima de la fila de espera en el rango (§16.1 métrica 6, A15).
 
-        La telemetría de la fila de espera la escribe la lógica con
-        ``tipo='fila_espera'`` y el entero en ``valor``; sin muestras devuelve 0.
+        Las muestras ``fila_espera`` se guardan solo al cambiar el valor, así
+        que también cuenta la última anterior al rango: es la fila que había
+        al empezar el periodo. Sin muestras devuelve 0.
         """
         with self._bd.candado:
             fila = self._bd.conexion.execute(
-                "SELECT MAX(CAST(valor AS INTEGER)) FROM telemetria "
-                "WHERE tipo = 'fila_espera' AND ts >= ? AND ts <= ?",
-                (inicio, fin),
+                "SELECT MAX(cantidad) FROM ("
+                "SELECT CAST(valor AS INTEGER) AS cantidad FROM telemetria "
+                "WHERE tipo = 'fila_espera' AND ts >= ? AND ts <= ? "
+                "UNION ALL SELECT cantidad FROM ("
+                "SELECT CAST(valor AS INTEGER) AS cantidad FROM telemetria "
+                "WHERE tipo = 'fila_espera' AND ts < ? ORDER BY ts DESC LIMIT 1))",
+                (inicio, fin, inicio),
             ).fetchone()
         return 0 if fila[0] is None else int(fila[0])
 

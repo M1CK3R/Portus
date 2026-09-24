@@ -13,21 +13,28 @@ import flask
 from flask import Blueprint
 
 from web.contexto import contexto
-from web.modelos.retencion import CausaRetencion, ResolucionRetencion, Retencion
-from web.modelos.usuario import Rol, Usuario
+from web.modelos.alarma import Severidad
+from web.modelos.reporte import ErrorRango, normalizar_rango
+from web.modelos.usuario import Rol
+from web.rutas.rutas_reportes import registrar_rutas_reportes
+from web.rutas.rutas_retenciones import registrar_rutas_retenciones
 from web.seguridad.permisos import (
+    ACCION_ANULAR_MANIFIESTO,
+    ACCION_CONSULTAR_CARGA,
+    ACCION_CREAR_MANIFIESTO,
     ACCION_EMITIR_COMANDO,
     ACCION_EXPORTAR_GRUA,
     ACCION_GENERAR_CODIGO_VINCULACION,
-    ACCION_GENERAR_REPORTE,
     ACCION_GESTIONAR_CITAS,
     ACCION_GESTIONAR_PATIO,
-    ACCION_GESTIONAR_TURNOS,
+    ACCION_OTORGAR_LEVANTE,
+    ACCION_PRESENTAR_DECLARACION,
     ACCION_RECONOCER_ALARMA,
-    ACCION_RESOLVER_RETENCION,
+    ACCION_SOLICITAR_LEVANTE,
+    ACCION_VER_CONTENEDORES_PROPIOS,
     ACCION_VER_GRUA,
     ACCION_VER_MANIFIESTOS,
-    ACCION_VER_RETENCIONES,
+    ACCION_VER_SEGUIMIENTO,
     ACCION_VER_SINOPTICO,
     ACCION_VER_TURNOS,
     Respuesta,
@@ -36,15 +43,11 @@ from web.seguridad.permisos import (
     respuesta_error,
 )
 from web.seguridad.sesion import cerrar_sesion, iniciar_sesion, usuario_en_sesion
+from web.servicios.servicio_alarmas import ErrorAlarma
+from web.servicios.servicio_alarmas import catalogo as catalogo_alarmas
 from web.servicios.servicio_auth import ERROR_SIN_ACCESO_WEB, ResultadoAutenticacion
-from web.servicios.servicio_retenciones import (
-    ErrorMotivoRequerido,
-    ErrorPermisoResolucion,
-    ErrorRetencion,
-    ErrorRetencionInexistente,
-    ErrorRetencionResuelta,
-)
-from web.servicios.servicio_turnos import ErrorTransicion
+from web.servicios.servicio_comandos import ErrorComando
+from web.servicios.servicio_patio import ErrorPosicion
 from web.tiempo import marca_utc
 
 ESTADOS_ACTIVOS = (
@@ -74,24 +77,6 @@ def crear_blueprint_api() -> Blueprint:
     api.add_url_rule("/api/manifiestos", view_func=manifiestos, methods=["GET"])
     api.add_url_rule("/api/turnos", view_func=turnos, methods=["GET"])
     api.add_url_rule("/api/turnos/<int:turno_id>", view_func=detalle_turno, methods=["GET"])
-    api.add_url_rule(
-        "/api/turnos/<int:turno_id>/retener", view_func=retener_turno, methods=["POST"]
-    )
-    api.add_url_rule("/api/turnos/<int:turno_id>/anular", view_func=anular_turno, methods=["POST"])
-    api.add_url_rule("/api/retenciones", view_func=retenciones, methods=["GET"])
-    api.add_url_rule(
-        "/api/retenciones/<int:retencion_id>/aclarar", view_func=aclarar_retencion, methods=["POST"]
-    )
-    api.add_url_rule(
-        "/api/retenciones/<int:retencion_id>/corregir",
-        view_func=corregir_retencion,
-        methods=["POST"],
-    )
-    api.add_url_rule(
-        "/api/retenciones/<int:retencion_id>/rechazar",
-        view_func=rechazar_retencion,
-        methods=["POST"],
-    )
     # Etapa 6 · TERMINAL (§14): sinóptico, patio, grúa, alarmas, citas, comandos, reportes.
     api.add_url_rule("/api/operacion", view_func=operacion, methods=["GET"])
     api.add_url_rule("/api/comandos/<nombre>", view_func=emitir_comando, methods=["POST"])
@@ -124,10 +109,9 @@ def crear_blueprint_api() -> Blueprint:
         "/api/franjas/<fecha>/<inicio>/bloquear", view_func=bloquear_franja, methods=["POST"]
     )
     api.add_url_rule("/api/transportistas", view_func=transportistas, methods=["GET"])
-    api.add_url_rule("/api/reportes", view_func=generar_reporte, methods=["POST"])
-    api.add_url_rule(
-        "/api/reportes/<int:reporte_id>/exportar", view_func=exportar_reporte, methods=["GET"]
-    )
+    _registrar_etapa7(api)
+    registrar_rutas_retenciones(api)
+    registrar_rutas_reportes(api)
     return api
 
 
@@ -284,140 +268,6 @@ def detalle_turno(turno_id: int) -> Respuesta:
     )
 
 
-@requiere_rol(ACCION_GESTIONAR_TURNOS)
-def retener_turno(turno_id: int) -> Respuesta:
-    """Retención manual operativa RT06 del turno (TERMINAL, §10.2)."""
-    datos = flask.request.get_json(silent=True) or {}
-    if not isinstance(datos, dict):
-        return respuesta_error(422, "CUERPO_INVALIDO", "Se espera un objeto JSON.")
-    nucleo = contexto().nucleo
-    turno = nucleo.maquina.buscar_turno(turno_id)
-    if turno is None:
-        return respuesta_error(404, "TURNO_INEXISTENTE", "No existe ese turno.")
-    try:
-        retenida = nucleo.retenciones_svc.retener(
-            turno,
-            CausaRetencion.RT06,
-            "operacion",
-            observacion=datos.get("observacion") or None,
-        )
-    except ErrorTransicion as error:
-        return respuesta_error(409, "TRANSICION_NO_PERMITIDA", str(error))
-    return _respuesta_retencion(retenida, 201)
-
-
-@requiere_rol(ACCION_GESTIONAR_TURNOS)
-def anular_turno(turno_id: int) -> Respuesta:
-    """Anula el turno y autoriza la salida sin completar (TERMINAL, §8.2 regla 4, §8.6)."""
-    datos = flask.request.get_json(silent=True) or {}
-    if (
-        not isinstance(datos, dict)
-        or not isinstance(datos.get("motivo"), str)
-        or not datos["motivo"].strip()
-    ):
-        return respuesta_error(422, "MOTIVO_REQUERIDO", "La anulación exige un motivo.")
-    nucleo = contexto().nucleo
-    turno = nucleo.maquina.buscar_turno(turno_id)
-    if turno is None:
-        return respuesta_error(404, "TURNO_INEXISTENTE", "No existe ese turno.")
-    try:
-        anulado = nucleo.maquina.anular(turno, datos["motivo"].strip(), "web")
-    except ErrorTransicion as error:
-        return respuesta_error(409, "TRANSICION_NO_PERMITIDA", str(error))
-    if anulado.estado.value == "Anulado":
-        nucleo.salida.autorizar_salida_anulacion(anulado)
-    return flask.jsonify({"turno": asdict(anulado)})
-
-
-# -------------------------------------------------------- Etapa 5: retenciones
-
-
-@requiere_rol(ACCION_VER_RETENCIONES)
-def retenciones() -> Respuesta:
-    """Bandeja de retenciones: TERMINAL todas; AUTORIDAD solo aduaneras (§7.4)."""
-    usuario = usuario_en_sesion(flask.session)
-    if usuario is None:  # no ocurre tras el decorador; defensa explícita
-        return respuesta_error(401, "SESION_REQUERIDA", "Inicie sesión.")
-    estado = flask.request.args.get("estado")
-    if estado not in (None, "abierta", "resuelta"):
-        return respuesta_error(422, "ESTADO_INVALIDO", "El estado debe ser abierta o resuelta.")
-    causa = flask.request.args.get("causa")
-    solo_aduaneras = usuario.rol is Rol.AUTORIDAD
-    filas = contexto().nucleo.retenciones.listar(
-        estado=estado, solo_aduaneras=solo_aduaneras, causa=causa
-    )
-    return flask.jsonify({"retenciones": [asdict(fila) for fila in filas]})
-
-
-def _resolver(retencion_id: int, resolucion: ResolucionRetencion, motivo: str | None) -> Respuesta:
-    """Aplica una resolución con el usuario en sesión y mapea los errores (§10.3)."""
-    usuario = usuario_en_sesion(flask.session)
-    if usuario is None:  # no ocurre tras el decorador; defensa explícita
-        return respuesta_error(401, "SESION_REQUERIDA", "Inicie sesión.")
-    try:
-        resuelta = contexto().nucleo.retenciones_svc.resolver(
-            retencion_id,
-            resolucion,
-            usuario,
-            motivo=motivo,
-            observacion=(flask.request.get_json(silent=True) or {}).get("observacion") or None,
-        )
-    except ErrorRetencionInexistente as error:
-        return respuesta_error(404, "RETENCION_INEXISTENTE", str(error))
-    except ErrorRetencionResuelta as error:
-        return respuesta_error(409, "RETENCION_RESUELTA", str(error))
-    except ErrorPermisoResolucion as error:
-        _auditar_resolucion_denegada(usuario, retencion_id, resolucion)
-        return respuesta_error(403, "ACCION_NO_PERMITIDA", str(error))
-    except ErrorMotivoRequerido as error:
-        return respuesta_error(422, "MOTIVO_REQUERIDO", str(error))
-    except ErrorRetencion as error:  # otros rechazos conocidos quedan explícitos
-        return respuesta_error(409, "CONFLICTO_RETENCION", str(error))
-    return _respuesta_retencion(resuelta, 200)
-
-
-def _respuesta_retencion(retencion: Retencion, codigo: int) -> Respuesta:
-    respuesta = flask.jsonify({"retencion": asdict(retencion)})
-    respuesta.status_code = codigo
-    return respuesta
-
-
-def _auditar_resolucion_denegada(
-    usuario: Usuario, retencion_id: int, resolucion: ResolucionRetencion
-) -> None:
-    """Deja constancia del 403 por causa no facultada (§7.5.5, D-6)."""
-    contexto().auditoria.registrar(
-        accion=f"resolver_retencion_{resolucion.value.lower()}",
-        recurso=f"/api/retenciones/{retencion_id}",
-        motivo="rol_no_facultado_causa",
-        instante=marca_utc(),
-        username=usuario.username,
-        rol=usuario.rol.value,
-    )
-
-
-@requiere_rol(ACCION_RESOLVER_RETENCION)
-def aclarar_retencion(retencion_id: int) -> Respuesta:
-    """Aclarar: libera la plaza y regresa el turno a su estado previo (§10.3)."""
-    return _resolver(retencion_id, ResolucionRetencion.ACLARAR, None)
-
-
-@requiere_rol(ACCION_RESOLVER_RETENCION)
-def corregir_retencion(retencion_id: int) -> Respuesta:
-    """Corregir: peso declarado = medido; solo TERMINAL en RT01/RT02 (§10.3, A12)."""
-    return _resolver(retencion_id, ResolucionRetencion.CORREGIR, None)
-
-
-@requiere_rol(ACCION_RESOLVER_RETENCION)
-def rechazar_retencion(retencion_id: int) -> Respuesta:
-    """Rechazar: exige motivo, anula el turno y autoriza la salida (§10.3)."""
-    datos = flask.request.get_json(silent=True) or {}
-    motivo = datos.get("motivo") if isinstance(datos, dict) else None
-    return _resolver(
-        retencion_id, ResolucionRetencion.RECHAZAR, motivo if isinstance(motivo, str) else None
-    )
-
-
 # -------------------------------------------------------- Etapa 6: TERMINAL §14
 
 
@@ -427,9 +277,10 @@ def operacion() -> Respuesta:
     nucleo = contexto().nucleo
     return flask.jsonify(
         {
-            "plazas": [asdict(p) for p in nucleo.plazas.todas()],
+            "plazas": nucleo.parqueo_svc.estado(),
             "posiciones": [asdict(p) for p in nucleo.patio.posiciones()],
             "celdas": [asdict(c) for c in nucleo.patio.celdas()],
+            "alarmas_activas": nucleo.alarmas_svc.cantidad_activas(),
         }
     )
 
@@ -448,7 +299,13 @@ def emitir_comando(nombre: str) -> Respuesta:
     parametros = datos.get("parametros") if isinstance(datos, dict) else None
     if not isinstance(parametros, dict):
         parametros = {}
-    cmd_id = contexto().nucleo.comandos_svc.emitir(nombre, parametros, usuario.username)
+    parametros_texto = {str(clave): str(valor) for clave, valor in parametros.items()}
+    try:
+        cmd_id = contexto().nucleo.comandos_svc.emitir(nombre, parametros_texto, usuario.username)
+    except ErrorComando as error:
+        # §6.3: no disponible en el estado actual → 409; solicitud mal formada → 422.
+        codigo_http = 409 if error.codigo == "COMANDO_NO_DISPONIBLE" else 422
+        return respuesta_error(codigo_http, error.codigo, str(error))
     return flask.jsonify({"cmd_id": cmd_id, "nombre": nombre})
 
 
@@ -467,20 +324,31 @@ def patio() -> Respuesta:
 
 @requiere_rol(ACCION_GESTIONAR_PATIO)
 def bloquear_posicion(posicion_id: str) -> Respuesta:
-    """Bloquea una posición del patio (§6.3 PosicionBloquear, §12.2)."""
-    nucleo = contexto().nucleo
-    if not nucleo.patio.bloquear_posicion(posicion_id):
-        return respuesta_error(409, "POSICION_NO_LIBRE", "La posición no está libre para bloquear.")
-    return flask.jsonify({"posicion": posicion_id, "estado": "bloqueada"})
+    """Envía PosicionBloquear; la BD cambia solo con el ACK del controlador (§6.1, §6.3)."""
+    return _comando_posicion(posicion_id, bloquear=True)
 
 
 @requiere_rol(ACCION_GESTIONAR_PATIO)
 def liberar_posicion(posicion_id: str) -> Respuesta:
-    """Libera el bloqueo de una posición (§6.3 PosicionLiberar, §12.2)."""
-    nucleo = contexto().nucleo
-    if not nucleo.patio.liberar_posicion(posicion_id):
-        return respuesta_error(409, "POSICION_NO_BLOQUEADA", "La posición no está bloqueada.")
-    return flask.jsonify({"posicion": posicion_id, "estado": "libre"})
+    """Envía PosicionLiberar (solo si está bloqueada); aplica con el ACK (§6.3)."""
+    return _comando_posicion(posicion_id, bloquear=False)
+
+
+def _comando_posicion(posicion_id: str, bloquear: bool) -> Respuesta:
+    """202 con el ``cmd_id``: el resultado real llega como ACK/NAK por MQTT (§6.2)."""
+    usuario = usuario_en_sesion(flask.session)
+    if usuario is None:  # no ocurre tras el decorador; defensa explícita
+        return respuesta_error(401, "SESION_REQUERIDA", "Inicie sesión.")
+    patio = contexto().nucleo.patio
+    solicitar = patio.solicitar_bloqueo if bloquear else patio.solicitar_liberacion
+    try:
+        cmd_id = solicitar(posicion_id, usuario.username)
+    except ErrorPosicion as error:
+        codigo = 404 if error.codigo == "POSICION_INEXISTENTE" else 409
+        return respuesta_error(codigo, error.codigo, str(error))
+    respuesta = flask.jsonify({"posicion": posicion_id, "cmd_id": cmd_id, "estado": "pendiente"})
+    respuesta.status_code = 202
+    return respuesta
 
 
 @requiere_rol(ACCION_VER_GRUA)
@@ -505,7 +373,12 @@ def exportar_grua() -> Respuesta:
     fin = flask.request.args.get("fin")
     if not inicio or not fin:
         return respuesta_error(422, "RANGO_REQUERIDO", "Se requieren 'inicio' y 'fin'.")
-    csv_texto = contexto().nucleo.grua_svc.exportar_csv(inicio, fin)
+    try:
+        # El rango llega en hora de la terminal; los ciclos están en UTC (Etapa 12).
+        desde, hasta = normalizar_rango(inicio, fin)
+    except ErrorRango as error:
+        return respuesta_error(422, error.codigo, str(error))
+    csv_texto = contexto().nucleo.grua_svc.exportar_csv(desde, hasta)
     respuesta = flask.make_response(csv_texto)
     respuesta.mimetype = "text/csv"
     respuesta.headers["Content-Disposition"] = "attachment; filename=historial_grua.csv"
@@ -514,13 +387,20 @@ def exportar_grua() -> Respuesta:
 
 @requiere_rol(ACCION_RECONOCER_ALARMA)
 def alarmas() -> Respuesta:
-    """Listas de alarmas activas e históricas con filtro por severidad (§13.3)."""
+    """Activas, históricas (filtro por severidad) y el catálogo §13.1 (§13.3)."""
     severidad = flask.request.args.get("severidad") or None
+    if severidad is not None and severidad not in {s.value for s in Severidad}:
+        return respuesta_error(
+            422,
+            "SEVERIDAD_INVALIDA",
+            f"Severidad CRITICA, ALTA, MEDIA o BAJA (recibido: {severidad}).",
+        )
     nucleo = contexto().nucleo
     return flask.jsonify(
         {
             "activas": [asdict(a) for a in nucleo.alarmas_svc.activas(severidad=severidad)],
             "historicas": [asdict(a) for a in nucleo.alarmas_svc.historicas(severidad=severidad)],
+            "catalogo": catalogo_alarmas(),
         }
     )
 
@@ -533,10 +413,14 @@ def reconocer_alarma(alarma_id: int) -> Respuesta:
         return respuesta_error(401, "SESION_REQUERIDA", "Inicie sesión.")
     datos = flask.request.get_json(silent=True) or {}
     comentario = datos.get("comentario") if isinstance(datos, dict) else None
-    comentario = comentario if isinstance(comentario, str) else None
-    if not contexto().nucleo.alarmas_svc.reconocer(alarma_id, usuario.id, comentario):
-        return respuesta_error(409, "ALARMA_NO_ACTIVA", "La alarma no está activa o no existe.")
-    return flask.jsonify({"alarma": alarma_id, "estado": "reconocida"})
+    comentario = comentario.strip() or None if isinstance(comentario, str) else None
+    try:
+        alarma = contexto().nucleo.alarmas_svc.reconocer(
+            alarma_id, usuario.id, usuario.username, comentario
+        )
+    except ErrorAlarma as error:
+        return respuesta_error(409, "ALARMA_NO_ACTIVA", str(error))
+    return flask.jsonify({"alarma": asdict(alarma)})
 
 
 @requiere_rol(ACCION_RECONOCER_ALARMA)
@@ -545,7 +429,9 @@ def reconocer_todas_alarmas() -> Respuesta:
     usuario = usuario_en_sesion(flask.session)
     if usuario is None:  # no ocurre tras el decorador; defensa explícita
         return respuesta_error(401, "SESION_REQUERIDA", "Inicie sesión.")
-    cantidad = contexto().nucleo.alarmas_svc.reconocer_todas_baja_media(usuario.id)
+    cantidad = contexto().nucleo.alarmas_svc.reconocer_todas_baja_media(
+        usuario.id, usuario.username
+    )
     return flask.jsonify({"reconocidas": cantidad})
 
 
@@ -573,8 +459,9 @@ def citas() -> Respuesta:
 @requiere_rol(ACCION_GESTIONAR_CITAS)
 def cancelar_cita(cita_id: int) -> Respuesta:
     """Cancela una cita programada y notifica al transportista (§11.4)."""
-    if not contexto().nucleo.citas_svc.cancelar(cita_id):
-        return respuesta_error(409, "CITA_NO_PROGRAMADA", "La cita no está programada.")
+    ok, motivo = contexto().nucleo.citas_svc.cancelar(cita_id)
+    if not ok:
+        return _error_de_cita(motivo)
     return flask.jsonify({"cita": cita_id, "estado": "cancelada"})
 
 
@@ -590,16 +477,33 @@ def reprogramar_cita(cita_id: int) -> Respuesta:
         return respuesta_error(422, "FRANJA_REQUERIDA", "Se requieren 'fecha' e 'inicio'.")
     ok, motivo = contexto().nucleo.citas_svc.reprogramar(cita_id, fecha, inicio)
     if not ok:
-        return respuesta_error(409, motivo or "REPROGRAMAR_FALLIDO", "No se pudo reprogramar.")
+        return _error_de_cita(motivo)
     return flask.jsonify({"cita": cita_id, "fecha": fecha, "inicio": inicio})
 
 
 @requiere_rol(ACCION_GESTIONAR_CITAS)
 def bloquear_franja(fecha: str, inicio: str) -> Respuesta:
-    """Bloquea una franja para impedir nuevas citas (§11.4, §14.5)."""
+    """Bloquea una franja, exista o no todavía, para impedir nuevas citas (§11.4, §14.5)."""
     if not contexto().nucleo.citas_svc.bloquear_franja(fecha, inicio):
-        return respuesta_error(404, "FRANJA_INEXISTENTE", "La franja no existe.")
+        return _error_de_cita("FRANJA_INVALIDA")
     return flask.jsonify({"fecha": fecha, "inicio": inicio, "bloqueada": True})
+
+
+ERRORES_DE_CITA: dict[str, tuple[int, str]] = {
+    "CITA_INEXISTENTE": (404, "No existe esa cita."),
+    "CITA_EN_USO": (409, "El vehículo ya ingresó con esta cita; su desenlace lo decide el turno."),
+    "CITA_NO_PROGRAMADA": (409, "La cita no está programada."),
+    "FRANJA_INVALIDA": (422, "La franja debe ser aaaa-mm-dd y HH:MM en múltiplos de 15 min."),
+    "FRANJA_PASADA": (409, "Solo se puede reprogramar a una franja futura."),
+    "FRANJA_BLOQUEADA": (409, "La franja está bloqueada."),
+    "FRANJA_SIN_CAPACIDAD": (409, "La franja ya tiene 2 citas."),
+}
+"""Motivo del servicio de citas → (HTTP, mensaje explícito sin detalles internos, S-5)."""
+
+
+def _error_de_cita(motivo: str) -> Respuesta:
+    codigo, mensaje = ERRORES_DE_CITA.get(motivo, (409, "No se pudo completar la acción."))
+    return respuesta_error(codigo, motivo or "ACCION_FALLIDA", mensaje)
 
 
 @requiere_rol(ACCION_GENERAR_CODIGO_VINCULACION)
@@ -609,38 +513,255 @@ def transportistas() -> Respuesta:
     return flask.jsonify({"transportistas": [asdict(f) for f in filas]})
 
 
-@requiere_rol(ACCION_GENERAR_REPORTE)
-def generar_reporte() -> Respuesta:
-    """Genera el reporte de corrida con las 8 métricas (§16.1, §16.3)."""
+# -------------------------------------------------- Etapa 7: NAVIERA §14.7
+
+
+@requiere_rol(ACCION_CREAR_MANIFIESTO)
+def crear_manifiesto() -> Respuesta:
+    """NAVIERA crea un manifiesto con validaciones (§9.3, §14.7)."""
     datos = flask.request.get_json(silent=True) or {}
     if not isinstance(datos, dict):
         return respuesta_error(422, "CUERPO_INVALIDO", "Se espera un objeto JSON.")
-    etiqueta = datos.get("etiqueta")
-    inicio = datos.get("inicio")
-    fin = datos.get("fin")
-    if not isinstance(etiqueta, str) or not isinstance(inicio, str) or not isinstance(fin, str):
-        return respuesta_error(
-            422, "CAMPOS_REQUERIDOS", "Se requieren 'etiqueta', 'inicio' y 'fin'."
-        )
     usuario = usuario_en_sesion(flask.session)
-    reporte = contexto().nucleo.reportes_svc.generar(
-        etiqueta=etiqueta,
-        inicio=inicio,
-        fin=fin,
-        generado_por=usuario.id if usuario is not None else None,
+    if usuario is None:
+        return respuesta_error(401, "SESION_REQUERIDA", "Inicie sesión.")
+    ok, resultado = contexto().servicio_manifiestos.crear(
+        naviera_id=usuario.id,
+        contenedor_id=str(datos.get("contenedor_id", "")),
+        tipo_op=str(datos.get("tipo_op", "")),
+        peso_declarado_g=int(datos.get("peso_declarado_g", 0)),
+        tolerancia_pct=int(datos.get("tolerancia_pct", 5)),
+        transportista_id=int(datos.get("transportista_id", 0)),
+        observaciones=str(datos.get("observaciones", "")),
     )
-    return flask.jsonify({"reporte": asdict(reporte)})
+    if not ok:
+        return respuesta_error(409, str(resultado), "No se pudo crear el manifiesto.")
+    return flask.jsonify({"manifiesto_id": resultado})
 
 
-@requiere_rol(ACCION_GENERAR_REPORTE)
-def exportar_reporte(reporte_id: int) -> Respuesta:
-    """Exporta el CSV con el detalle de cada turno del periodo (§16.3)."""
-    nucleo = contexto().nucleo
-    reporte = nucleo.reportes_repo.buscar_por_id(reporte_id)
-    if reporte is None:
-        return respuesta_error(404, "REPORTE_INEXISTENTE", "No existe ese reporte.")
-    csv_texto = nucleo.reportes_svc.exportar_csv(reporte.inicio, reporte.fin)
-    respuesta = flask.make_response(csv_texto)
-    respuesta.mimetype = "text/csv"
-    respuesta.headers["Content-Disposition"] = f"attachment; filename=reporte_{reporte_id}.csv"
-    return respuesta
+@requiere_rol(ACCION_VER_MANIFIESTOS)
+def detalle_manifiesto(manifiesto_id: int) -> Respuesta:
+    """Detalle del manifiesto con historial (§14.7); NAVIERA solo los propios (§7.4)."""
+    usuario = usuario_en_sesion(flask.session)
+    if usuario is None:  # no ocurre tras el decorador; defensa explícita
+        return respuesta_error(401, "SESION_REQUERIDA", "Inicie sesión.")
+    servicio = contexto().servicio_manifiestos
+    naviera_id = usuario.id if usuario.rol is Rol.NAVIERA else None
+    detalle = servicio.detalle(manifiesto_id, naviera_id)
+    if detalle is None:
+        if naviera_id is not None and servicio.existe(manifiesto_id):
+            # [DEC §7.5.2] 403 y no 404: el aislamiento entre navieras se
+            # demuestra en la evaluación y el rechazo queda auditado (§7.5.5).
+            contexto().auditoria.registrar(
+                accion="ver_manifiesto",
+                recurso=flask.request.path,
+                motivo="manifiesto_de_otra_naviera",
+                instante=marca_utc(),
+                username=usuario.username,
+                rol=usuario.rol.value,
+            )
+            return respuesta_error(
+                403, "ACCION_NO_PERMITIDA", "El manifiesto pertenece a otra naviera."
+            )
+        return respuesta_error(404, "MANIFIESTO_INEXISTENTE", "No existe ese manifiesto.")
+    return flask.jsonify(
+        {
+            "manifiesto": asdict(detalle.manifiesto),
+            "historial": [asdict(h) for h in detalle.historial],
+        }
+    )
+
+
+@requiere_rol(ACCION_ANULAR_MANIFIESTO)
+def anular_manifiesto(manifiesto_id: int) -> Respuesta:
+    """Anula el manifiesto solo si no tiene turno (§14.7)."""
+    usuario = usuario_en_sesion(flask.session)
+    if usuario is None:
+        return respuesta_error(401, "SESION_REQUERIDA", "Inicie sesión.")
+    if not contexto().servicio_manifiestos.anular(manifiesto_id, usuario.id):
+        return respuesta_error(409, "NO_ANULABLE", "El manifiesto ya tiene turno o no es suyo.")
+    return flask.jsonify({"manifiesto": manifiesto_id, "estado": "anulado"})
+
+
+@requiere_rol(ACCION_VER_CONTENEDORES_PROPIOS)
+def contenedores_propios() -> Respuesta:
+    """Contenedores de la naviera en sesión (§14.7, aislamiento §7.5.2)."""
+    usuario = usuario_en_sesion(flask.session)
+    if usuario is None:
+        return respuesta_error(401, "SESION_REQUERIDA", "Inicie sesión.")
+    filas = contexto().servicio_manifiestos.mis_contenedores(usuario.id)
+    return flask.jsonify({"contenedores": [asdict(f) for f in filas]})
+
+
+# -------------------------------------------------- Etapa 7: AGENTE §14.8
+
+
+@requiere_rol(ACCION_PRESENTAR_DECLARACION)
+def bandeja_declaraciones() -> Respuesta:
+    """Manifiestos sin levante para el AGENTE (§14.8)."""
+    filas = contexto().servicio_declaraciones.bandeja_sin_levante()
+    return flask.jsonify({"manifiestos": [asdict(f) for f in filas]})
+
+
+@requiere_rol(ACCION_PRESENTAR_DECLARACION)
+def presentar_declaracion() -> Respuesta:
+    """Presenta la declaración de mercancías (§9.3, §14.8)."""
+    datos = flask.request.get_json(silent=True) or {}
+    if not isinstance(datos, dict):
+        return respuesta_error(422, "CUERPO_INVALIDO", "Se espera un objeto JSON.")
+    usuario = usuario_en_sesion(flask.session)
+    if usuario is None:
+        return respuesta_error(401, "SESION_REQUERIDA", "Inicie sesión.")
+    from web.modelos.declaracion import Regimen
+
+    try:
+        regimen = Regimen(str(datos.get("regimen", "")))
+    except ValueError:
+        return respuesta_error(422, "REGIMEN_INVALIDO", "Régimen no reconocido (§9.3).")
+    ok, resultado = contexto().servicio_declaraciones.presentar(
+        agente_id=usuario.id,
+        manifiesto_id=int(datos.get("manifiesto_id", 0)),
+        numero=str(datos.get("numero", "")),
+        regimen=regimen,
+        descripcion=str(datos.get("descripcion", "")),
+        valor=int(datos.get("valor", 0)),
+    )
+    if not ok:
+        return respuesta_error(409, str(resultado), "No se pudo presentar la declaración.")
+    return flask.jsonify({"declaracion_id": resultado})
+
+
+@requiere_rol(ACCION_SOLICITAR_LEVANTE)
+def solicitar_levante(manifiesto_id: int) -> Respuesta:
+    """Solicita el levante (solo con declaración presentada) (§9.1, §14.8)."""
+    usuario = usuario_en_sesion(flask.session)
+    if usuario is None:
+        return respuesta_error(401, "SESION_REQUERIDA", "Inicie sesión.")
+    ok, resultado = contexto().servicio_declaraciones.solicitar_levante(usuario.id, manifiesto_id)
+    if not ok:
+        return respuesta_error(409, str(resultado), "No se pudo solicitar el levante.")
+    return flask.jsonify({"levante_id": resultado})
+
+
+@requiere_rol(ACCION_SOLICITAR_LEVANTE)
+def adjuntar_observacion(manifiesto_id: int) -> Respuesta:
+    """Adjunta una observación visible para la AUTORIDAD (§14.8)."""
+    datos = flask.request.get_json(silent=True) or {}
+    observacion = datos.get("observacion", "") if isinstance(datos, dict) else ""
+    if not str(observacion).strip():
+        return respuesta_error(422, "OBSERVACION_REQUERIDA", "La observación no puede estar vacía.")
+    contexto().servicio_declaraciones.adjuntar_observacion(manifiesto_id, str(observacion))
+    return flask.jsonify({"manifiesto": manifiesto_id, "observacion": str(observacion)})
+
+
+@requiere_rol(ACCION_VER_SEGUIMIENTO)
+def seguimiento_agente() -> Respuesta:
+    """Estado de las solicitudes del agente (§14.8)."""
+    usuario = usuario_en_sesion(flask.session)
+    if usuario is None:
+        return respuesta_error(401, "SESION_REQUERIDA", "Inicie sesión.")
+    from web.repositorios.repositorio_levantes import RepositorioLevantes
+
+    repo = RepositorioLevantes(contexto().nucleo.turnos_repo._bd)
+    filas = repo.seguimiento_de_agente(usuario.id)
+    return flask.jsonify({"solicitudes": [asdict(f) for f in filas]})
+
+
+# -------------------------------------------------- Etapa 7: AUTORIDAD §14.9
+
+
+@requiere_rol(ACCION_OTORGAR_LEVANTE)
+def levantes_pendientes() -> Respuesta:
+    """Bandeja de solicitudes de levante pendientes (§14.9)."""
+    filas = contexto().servicio_levantes.pendientes()
+    return flask.jsonify({"solicitudes": [asdict(f) for f in filas]})
+
+
+@requiere_rol(ACCION_OTORGAR_LEVANTE)
+def otorgar_levante(levante_id: int) -> Respuesta:
+    """Otorga el levante con canal verde/rojo (§9.1, §9.2)."""
+    datos = flask.request.get_json(silent=True) or {}
+    canal = datos.get("canal", "") if isinstance(datos, dict) else ""
+    usuario = usuario_en_sesion(flask.session)
+    if usuario is None:
+        return respuesta_error(401, "SESION_REQUERIDA", "Inicie sesión.")
+    ok, causa = contexto().servicio_levantes.otorgar(levante_id, str(canal), usuario.id)
+    if not ok:
+        return respuesta_error(409, causa, "No se pudo otorgar el levante.")
+    return flask.jsonify({"levante": levante_id, "estado": "otorgada", "canal": str(canal)})
+
+
+@requiere_rol(ACCION_OTORGAR_LEVANTE)
+def retener_levante(levante_id: int) -> Respuesta:
+    """Retiene el levante con motivo (§9.1, §9.2)."""
+    datos = flask.request.get_json(silent=True) or {}
+    motivo = datos.get("motivo", "") if isinstance(datos, dict) else ""
+    usuario = usuario_en_sesion(flask.session)
+    if usuario is None:
+        return respuesta_error(401, "SESION_REQUERIDA", "Inicie sesión.")
+    ok, causa = contexto().servicio_levantes.retener(levante_id, str(motivo), usuario.id)
+    if not ok:
+        return respuesta_error(409, causa, "No se pudo retener el levante.")
+    return flask.jsonify({"levante": levante_id, "estado": "retenida", "motivo": str(motivo)})
+
+
+@requiere_rol(ACCION_OTORGAR_LEVANTE)
+def ver_declaracion(levante_id: int) -> Respuesta:
+    """Ver la declaración de mercancías del levante (§14.9)."""
+    decl = contexto().servicio_levantes.ver_declaracion(levante_id)
+    if decl is None:
+        return respuesta_error(
+            404, "DECLARACION_INEXISTENTE", "No hay declaración para ese levante."
+        )
+    return flask.jsonify({"declaracion": asdict(decl)})
+
+
+@requiere_rol(ACCION_CONSULTAR_CARGA)
+def consulta_carga() -> Respuesta:
+    """Consulta de carga: cualquier contenedor (§14.9)."""
+    contenedor_id = flask.request.args.get("contenedor_id") or None
+    filas = contexto().servicio_levantes.consulta_carga(contenedor_id)
+    return flask.jsonify({"contenedores": [asdict(f) for f in filas]})
+
+
+# -------------------------------------------------- Registro Etapa 7
+
+
+def _registrar_etapa7(api: Blueprint) -> None:
+    """Registra los endpoints de la Etapa 7 (NAVIERA/AGENTE/AUTORIDAD)."""
+    api.add_url_rule("/api/manifiestos", view_func=crear_manifiesto, methods=["POST"])
+    api.add_url_rule(
+        "/api/manifiestos/<int:manifiesto_id>/detalle",
+        view_func=detalle_manifiesto,
+        methods=["GET"],
+    )
+    api.add_url_rule(
+        "/api/manifiestos/<int:manifiesto_id>/anular", view_func=anular_manifiesto, methods=["POST"]
+    )
+    api.add_url_rule("/api/naviera/contenedores", view_func=contenedores_propios, methods=["GET"])
+    api.add_url_rule("/api/declaraciones", view_func=bandeja_declaraciones, methods=["GET"])
+    api.add_url_rule(
+        "/api/declaraciones/presentar", view_func=presentar_declaracion, methods=["POST"]
+    )
+    api.add_url_rule(
+        "/api/manifiestos/<int:manifiesto_id>/solicitar-levante",
+        view_func=solicitar_levante,
+        methods=["POST"],
+    )
+    api.add_url_rule(
+        "/api/manifiestos/<int:manifiesto_id>/observacion",
+        view_func=adjuntar_observacion,
+        methods=["POST"],
+    )
+    api.add_url_rule("/api/agente/seguimiento", view_func=seguimiento_agente, methods=["GET"])
+    api.add_url_rule("/api/levantes", view_func=levantes_pendientes, methods=["GET"])
+    api.add_url_rule(
+        "/api/levantes/<int:levante_id>/otorgar", view_func=otorgar_levante, methods=["POST"]
+    )
+    api.add_url_rule(
+        "/api/levantes/<int:levante_id>/retener", view_func=retener_levante, methods=["POST"]
+    )
+    api.add_url_rule(
+        "/api/levantes/<int:levante_id>/declaracion", view_func=ver_declaracion, methods=["GET"]
+    )
+    api.add_url_rule("/api/autoridad/consulta-carga", view_func=consulta_carga, methods=["GET"])

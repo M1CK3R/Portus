@@ -148,20 +148,6 @@ class RepositorioTurnos:
             ).fetchall()
         return [(str(f[0]), str(f[1]), str(f[2])) for f in filas]
 
-    def detalle_csv_en_rango(self, inicio: str, fin: str) -> list[tuple[object, ...]]:
-        """Filas planas de cada turno del periodo para el CSV del reporte (§16.3)."""
-        with self._bd.candado:
-            filas = self._bd.conexion.execute(
-                "SELECT turno.id, vehiculo.identificador, manifiesto.contenedor_id, "
-                "turno.tipo_op, turno.estado, turno.peso_entrada_g, turno.peso_salida_g, "
-                "turno.posicion_patio, turno.creado_en, turno.cerrado_en "
-                "FROM turno JOIN vehiculo ON turno.vehiculo_id = vehiculo.id "
-                "JOIN manifiesto ON turno.manifiesto_id = manifiesto.id "
-                "WHERE turno.creado_en >= ? AND turno.creado_en <= ? ORDER BY turno.id",
-                (inicio, fin),
-            ).fetchall()
-        return [tuple(f) for f in filas]
-
 
 @dataclass(frozen=True)
 class FilaTurno:

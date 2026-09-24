@@ -3,12 +3,15 @@
 El servidor planifica la cola del turno (depósito, retiro con sus remociones),
 la envía al controlador como ``JOB`` (§4.4) y la actualiza **solo** con las
 confirmaciones físicas ``GRU``/``PAT`` (§8.2 regla 2): un aborto devuelve el
-trabajo a la cola sin tocar el inventario (§12.3).
+trabajo a la cola sin tocar el inventario (§12.3). Cada ciclo se registra con
+su inicio real (envío del JOB) y la distancia derivada en posiciones (A16).
 """
 
 import logging
+from collections.abc import Callable
+from datetime import datetime
 
-from web.modelos.ciclo_grua import ResultadoCiclo
+from web.modelos.ciclo_grua import ResultadoCiclo, distancia_de_ciclo
 from web.modelos.patio import CeldaInventario, PoliticaAsignacion
 from web.modelos.trabajos import ORIGEN_VEHICULO, EstadoTrabajo, TipoTrabajo, Trabajo
 from web.modelos.turno import EstadoTurno, Turno
@@ -18,11 +21,14 @@ from web.repositorios.repositorio_turnos import RepositorioTurnos
 from web.repositorios.repositorio_vehiculos import RepositorioVehiculos
 from web.servicios.puertos import PublicadorLogica
 from web.servicios.servicio_turnos import ServicioTurnos
+from web.tiempo import marca_utc
 
 REGISTRO = logging.getLogger(__name__)
 
 TOPICO_SRV_TURNO = "portus/srv/turno"
 TIPO_TURNO_TRABAJO = "turno.trabajo"
+TOPICO_SRV_PATIO = "portus/srv/patio"
+TIPO_PATIO_ESTADO = "patio.estado"
 
 PASO_FIN = "FIN"
 PASO_ABORTO = "ABORTO"
@@ -42,6 +48,7 @@ class ServicioTrabajos:
         politica: PoliticaAsignacion,
         posiciones: tuple[str, ...],
         publicador: PublicadorLogica,
+        fabrica_instante: Callable[[], datetime],
     ) -> None:
         self._trabajos = trabajos
         self._inventario = inventario
@@ -51,6 +58,7 @@ class ServicioTrabajos:
         self._politica = politica
         self._posiciones = posiciones
         self._publicador = publicador
+        self._fabrica_instante = fabrica_instante
 
     # ------------------------------------------------------------- planificar
 
@@ -156,7 +164,7 @@ class ServicioTrabajos:
         if not pendientes or self._trabajos.en_curso(turno.id) is not None:
             return None
         siguiente = pendientes[0]
-        self._trabajos.marcar_en_curso(siguiente.id)
+        self._trabajos.marcar_en_curso(siguiente.id, marca_utc(self._fabrica_instante()))
         self._publicador.publicar(
             TOPICO_SRV_TURNO,
             TIPO_TURNO_TRABAJO,
@@ -181,6 +189,43 @@ class ServicioTrabajos:
 
     def quedan_pendientes(self, turno_id: int) -> bool:
         return self._trabajos.quedan_pendientes(turno_id)
+
+    def cancelar_pendientes(self, turno: Turno) -> list[Trabajo]:
+        """Turno anulado: cancela su cola y libera las reservas sin movimiento físico (§12.3).
+
+        Solo se liberan destinos de trabajos que nunca empezaron; el inventario
+        confirmado no cambia, así que coincide con la ubicación física real.
+        """
+        cancelados = self._trabajos.cancelar_pendientes(turno.id)
+        liberadas: list[str] = []
+        for trabajo in cancelados:
+            if trabajo.destino == ORIGEN_VEHICULO:
+                continue
+            posicion = trabajo.destino.split("/")[0]
+            estado = self._inventario.liberar_reserva(posicion)
+            if estado is not None:
+                liberadas.append(posicion)
+                self._publicador.publicar(
+                    TOPICO_SRV_PATIO, TIPO_PATIO_ESTADO, {"posicion": posicion, "estado": estado}
+                )
+        if cancelados:
+            self._maquina.registrar_evento(
+                turno,
+                tipo="trabajo.cancelado",
+                descripcion=f"Turno anulado: {len(cancelados)} trabajo(s) de grúa cancelado(s)",
+                valores={
+                    "trabajos": [t.id for t in cancelados],
+                    "reservas_liberadas": liberadas,
+                },
+                origen="servidor",
+            )
+            REGISTRO.info(
+                "Turno %d anulado: trabajos %s cancelados, reservas liberadas %s",
+                turno.id,
+                [t.id for t in cancelados],
+                liberadas,
+            )
+        return cancelados
 
     # --------------------------------------------------- confirmaciones GRU
 
@@ -224,7 +269,6 @@ class ServicioTrabajos:
         contenedor: str,
         seq: int | None,
         ts: str,
-        distancia: int = 0,
     ) -> None:
         """Aplica una confirmación GRU del controlador sobre el trabajo en curso.
 
@@ -240,10 +284,10 @@ class ServicioTrabajos:
             )
             return
         if paso == PASO_FIN and resultado == RESULTADO_OK:
-            self._completar(turno, trabajo, seq, ts, distancia)
+            self._completar(turno, trabajo, seq, ts)
             return
         if paso == PASO_ABORTO:
-            self._abortar(turno, trabajo, resultado, seq, ts, distancia)
+            self._abortar(turno, trabajo, resultado, seq, ts)
             return
         REGISTRO.info(
             "GRU paso=%s resultado=%s del trabajo %d: sin efecto en el plan",
@@ -252,11 +296,9 @@ class ServicioTrabajos:
             trabajo.id,
         )
 
-    def _completar(
-        self, turno: Turno, trabajo: Trabajo, seq: int | None, ts: str, distancia: int
-    ) -> None:
+    def _completar(self, turno: Turno, trabajo: Trabajo, seq: int | None, ts: str) -> None:
+        self._registrar_ciclo(turno, trabajo, ResultadoCiclo.COMPLETADO, ts)
         self._trabajos.completar(trabajo.id)
-        self._registrar_ciclo(turno, trabajo, ResultadoCiclo.COMPLETADO, ts, distancia)
         if trabajo.tipo is TipoTrabajo.REMOCION:
             self._inventario.incrementar_remociones(trabajo.contenedor_id)
         self._maquina.registrar_evento(
@@ -288,10 +330,9 @@ class ServicioTrabajos:
         resultado: str,
         seq: int | None,
         ts: str,
-        distancia: int,
     ) -> None:
+        self._registrar_ciclo(turno, trabajo, ResultadoCiclo.ABORTADO, ts)
         self._trabajos.abortar(trabajo.id)
-        self._registrar_ciclo(turno, trabajo, ResultadoCiclo.ABORTADO, ts, distancia)
         self._maquina.registrar_evento(
             turno,
             tipo="trabajo.abortado",
@@ -310,14 +351,24 @@ class ServicioTrabajos:
         trabajo: Trabajo,
         resultado: ResultadoCiclo,
         ts_fin: str,
-        distancia: int,
     ) -> None:
-        """Persiste el ciclo de grúa completado o abortado (SPECS §12.6)."""
+        """Persiste el ciclo con su inicio real y la distancia en posiciones (§12.6, A16).
+
+        Se registra antes de cambiar el estado del trabajo para que la
+        posición de partida sea la del ciclo anterior.
+        """
+        distancia = distancia_de_ciclo(
+            self._trabajos.ultimo_extremo_de_grua(),
+            trabajo.origen,
+            trabajo.destino,
+            resultado,
+            self._posiciones,
+        )
         self._trabajos.registrar_ciclo(
             turno_id=turno.id,
             trabajo_id=trabajo.id,
             tipo=trabajo.tipo,
-            ts_inicio=trabajo.creado_en or ts_fin,
+            ts_inicio=self._trabajos.inicio_de(trabajo.id) or trabajo.creado_en or ts_fin,
             ts_fin=ts_fin,
             distancia_traslacion=distancia,
             resultado=resultado,
