@@ -4,8 +4,9 @@ TERMINAL genera, por cada transportista, un código de 6 caracteres de un
 solo uso con vigencia de 60 minutos; generar uno nuevo invalida los activos
 anteriores del mismo transportista. El alfabeto excluye los caracteres
 ambiguos ``0/O`` y ``1/I/L`` y la generación usa fuente criptográfica
-(``secrets``, PY-8). El consumo lo hará el bot de mensajería (Etapa 10) con
-comparación en tiempo constante; el método ya existe para fijar el ciclo.
+(``secrets``, PY-8). El bot de mensajería (Etapa 10) lo consume con
+``/vincular CODIGO``: comparación en tiempo constante y asociación del chat
+en la misma transacción que marca el código como usado.
 """
 
 import hmac
@@ -61,23 +62,42 @@ class ServicioVinculacion:
         return creado
 
     def consumir(self, codigo_texto: str) -> Usuario | None:
-        """Consume un código vigente y devuelve su transportista (§15.1).
+        """Consume un código vigente y devuelve su transportista, sin asociar cuenta (§15.1).
 
-        Es la operación que la Etapa 10 invocará desde ``/vincular CODIGO``.
         La comparación contra los códigos activos es en tiempo constante
         (PY-8); el texto se normaliza para tolerar minúsculas y espacios.
         """
-        codigo_normalizado = codigo_texto.strip().upper()
-        ahora = self._fabrica_instante()
-        objetivo: CodigoVinculacion | None = None
-        for candidato in self._vinculos.activos(marca_utc(ahora)):
-            if hmac.compare_digest(candidato.codigo, codigo_normalizado):
-                objetivo = candidato
-                break
+        ahora = marca_utc(self._fabrica_instante())
+        objetivo = self._buscar_activo(codigo_texto, ahora)
         if objetivo is None:
             return None
-        self._vinculos.marcar_usado(objetivo.codigo, marca_utc(ahora))
+        self._vinculos.marcar_usado(objetivo.codigo, ahora)
         return self._usuarios.buscar_por_id(objetivo.transportista_id)
+
+    def vincular_cuenta(self, codigo_texto: str, id_chat: int) -> Usuario | None:
+        """``/vincular CODIGO``: consume el código y asocia el chat (§15.1 pasos 2-4).
+
+        Devuelve el transportista para confirmar con su nombre, o None si el
+        código es inválido, ya se usó o venció (la respuesta no distingue
+        cuál, para no orientar a quien prueba códigos al azar).
+        """
+        ahora = marca_utc(self._fabrica_instante())
+        objetivo = self._buscar_activo(codigo_texto, ahora)
+        if objetivo is None:
+            return None
+        transportista_id = self._vinculos.consumir_y_vincular(objetivo.codigo, id_chat, ahora)
+        if transportista_id is None:
+            return None
+        return self._usuarios.buscar_por_id(transportista_id)
+
+    def _buscar_activo(self, codigo_texto: str, ahora: str) -> CodigoVinculacion | None:
+        """Código vigente que coincide, comparado en tiempo constante (PY-8)."""
+        codigo_normalizado = codigo_texto.strip().upper()
+        objetivo: CodigoVinculacion | None = None
+        for candidato in self._vinculos.activos(ahora):
+            if hmac.compare_digest(candidato.codigo, codigo_normalizado):
+                objetivo = candidato
+        return objetivo
 
     def listar_panel_vinculacion(self) -> list["TransportistaPanel"]:
         """Lista de transportistas con su estado de vinculación (§14.5, A17).

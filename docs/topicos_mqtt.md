@@ -22,9 +22,10 @@ El prefijo `portus` es obligatorio y **exacto** (SPECS §5.1): sin sufijos de gr
 | `portus/cmd/solicitud` | Hacia el controlador | Comando remoto emitido desde la plataforma | 1 | no |
 | `portus/cmd/respuesta` | Del controlador | ACK/NAK del comando con su causa | 1 | no |
 | `portus/srv/turno` | Del servidor | Autorización AUT, trabajos JOB, cambios de estado, patio e inventario del turno (Etapa 5) | 1 | no |
-| `portus/srv/retencion` | Del servidor | Retenciones abiertas/resueltas y notificaciones del turno (Etapa 5) | 1 | no |
-| `portus/srv/alarma` | Del servidor | Alarmas del servidor: AL01, AL09, AL10, AL11, AL14 (AL12/AL13 con su planificador) | 1 | no |
-| `portus/srv/cita` | Del servidor | Citas (Etapa 11) | 1 | no |
+| `portus/srv/retencion` | Del servidor | `retencion.abierta` / `retencion.resuelta`, avisos 5 y 6 al transportista (`notificacion.vehiculo_retenido`, `notificacion.retencion_resuelta`) y `parqueo.plaza` (plaza ocupada al retener; liberada al resolver sin ramal o tras el ACK de `AgujaLiberar`). Ver §7 | 1 | no |
+| `portus/srv/patio` | Del servidor | `patio.estado`: posición bloqueada o liberada tras el ACK de `PosicionBloquear`/`PosicionLiberar`, o reserva liberada al anular un turno (§12.3) | 1 | no |
+| `portus/srv/alarma` | Del servidor | `alarma.servidor` (AL01 del puente; AL09–AL14 de la web), `alarma.resumen` (`{"activas": n}` tras cada alta o reconocimiento) y `alarma.reconocida`. Ver §8 y `docs/alarmas.md` | 1 | no |
+| `portus/srv/cita` | Del servidor | Avisos de la agenda y de la cadena documental: `notificacion.cita_cancelada`, `notificacion.cita_reprogramada`, `notificacion.levante_otorgado`, `notificacion.levante_retenido` (el levante habilita la cita, §11.1 regla 3), y `cita.vencida` (`cita`, `contenedor`, `fecha`, `inicio`, `fin`) cuando la tarea de vencimiento cierra una cita no atendida (`docs/citas.md`). Ver §9 | 1 | no |
 | `portus/srv/enlace` | Del puente | Estado del enlace, saltos de secuencia, Last Will | 1 | **sí** |
 
 ## 2. Envoltorio del mensaje (SPECS §5.2)
@@ -87,7 +88,7 @@ QoS 1 entrega *al menos una vez*: el broker puede duplicar, y la reconciliación
 | Sinóptico (navegador, MQTT sobre WebSocket 9001) | `portus/evt/#`, `portus/srv/#`, `portus/cmd/respuesta` | Actualiza la vista sin consultar la base de datos (prohibido el polling) |
 | Persistencia (puente, suscripción interna a `portus/#`) | `portus/#` | Guarda eventos, telemetría y comandos con deduplicación por `id` |
 | Lógica de negocio (Etapa 5) | Eventos del controlador | Máquina de estados del turno, retenciones y alarmas |
-| Servicio de mensajería (Etapa 10) | `portus/srv/turno`, `retencion`, `cita`, `alarma` | Notificaciones al transportista propietario |
+| Servicio de mensajería (`portus-msg`, Etapa 10) | `portus/srv/turno`, `portus/srv/retencion`, `portus/srv/cita` | Toma los `notificacion.*`, relee la fila por su id y la entrega por Telegram solo al transportista propietario (§9) |
 | Vigilante de enlace (puente) | Latido `EST` (recepción serial directa) | Declara AL01 tras 3 periodos sin latido |
 
 > Nota de diseño: en la Etapa 3 la persistencia corre dentro del puente y persiste todo lo que él publica más lo recibido del broker. Cuando la web y el bot publiquen sus propios `srv/*` (Etapas 5+), o bien pasan sus mensajes por los mismos tópicos (la persistencia los recibe por la suscripción `portus/#`) o se extrae el consumidor a un servicio propio; el formato no cambia.
@@ -97,3 +98,52 @@ QoS 1 entrega *al menos una vez*: el broker puede duplicar, y la reconciliación
 - Listener TCP 1883 **y** listener MQTT sobre WebSocket 9001 (`config/mosquitto.conf`).
 - Autenticación por usuario/servicio con `mosquitto_passwd`; `allow_anonymous false`.
 - ACL por servicio en `config/acl_portus`: el puente es el único `readwrite portus/#`; la web escribe `cmd/solicitud` y `srv/#`; el bot solo lee los `srv/*` de notificaciones; **el navegador es solo lectura**.
+
+## 7. Retenciones y parqueo (SPECS §10, Etapa 8)
+
+`datos` de `retencion.abierta` y `retencion.resuelta` en `portus/srv/retencion`:
+
+```json
+{ "retencion": 7, "turno": 12, "causa": "RT01", "estacion": "pesaje_entrada", "plaza": 1,
+  "estado": "abierta", "peso_declarado_g": 38500, "peso_medido_g": 44050,
+  "resolucion": null, "motivo": null, "creada_en": "2026-09-20T14:03:22.418Z", "resuelta_en": null }
+```
+
+- `estacion` ∈ `garita`, `pesaje_entrada` (el vehículo entra al ramal: sale `AgujaParqueo`), `pesaje_salida`, `salida` (plaza lógica, A3 [DEC]). `plaza` es `null` si el parqueo estaba lleno (AL11).
+- RT01 aclarada o corregida en un turno de canal rojo **no** libera la plaza: abre de inmediato una `retencion.abierta` RT03 con la misma plaza (§9.2).
+- `parqueo.plaza`: `{ "plaza": 1, "turno": 12 }` al ocupar y `{ "plaza": 1, "turno": null }` al liberar.
+- `notificacion.vehiculo_retenido`: `vehiculo`, `contenedor`, `causa` y, en RT01/RT02, `peso_declarado_g`, `peso_medido_g`, `diferencia_g`, `diferencia_pct` (§10.7). `notificacion.retencion_resuelta`: `vehiculo`, `contenedor`, `resolucion`, `nuevo_peso_declarado_g` (Corregir) o `motivo` (Rechazar). Ambos llevan `transportista`.
+- Rechazar anula el turno: además sale `notificacion.turno_anulado` con `resultado: "anulado"` y `motivo` en `portus/srv/turno` (aviso 9).
+- AL12 en `portus/srv/alarma` (`tipo: alarma.servidor`): `{ "codigo": "AL12", "severidad": "MEDIA", "retencion": 7, "turno": 12, "causa": "RT01", "plaza": 1, "creada_en": "…", "limite_min": 30 }`. Se emite **una vez por retención** (tabla `alerta_emitida`); si varias se exceden, la alarma activa acumula `repeticiones` (§13.4 [DEC]).
+
+## 8. Alarmas (SPECS §13, Etapa 9)
+
+Detalle completo en `docs/alarmas.md`. Lo que circula por MQTT:
+
+| Tipo | Tópico | `datos` |
+|---|---|---|
+| `alarma.controlador` | `portus/evt/alarma` | `codigo`, `severidad` y datos del `ALM`; la web lo persiste con la severidad del **catálogo** |
+| `alarma.servidor` | `portus/srv/alarma` | `codigo`, `severidad`, `descripcion`, `alarma` (id) y datos propios. El de AL01 lo publica el puente y la web lo persiste; los demás los publica la web tras persistirlos |
+| `alarma.resumen` | `portus/srv/alarma` | `{"activas": n}`: cantidad exacta de alarmas activas (filas, no repeticiones) para el sinóptico |
+| `alarma.reconocida` | `portus/srv/alarma` | `alarma` (id; 0 en el reconocimiento en lote), `codigo`, `usuario` |
+
+AL14 (`alarma.servidor`) lleva `cmd_id`, `nombre`, `causa`, `texto_causa` (§6.5) y `sintetica` (true si fue el NAK `SIN_RESPUESTA` del puente).
+
+## 9. Notificaciones al transportista (SPECS §15.3, Etapa 10)
+
+La web **persiste** cada aviso en `notificacion` y luego publica `notificacion.<tipo>` con el id de la fila (`web/servicios/notificador.py`). El bot relee la fila por ese id, así que el mensaje MQTT solo dispara la entrega: si el bot o internet están caídos, el aviso queda pendiente en la BD y sale después (§15.4). Todos los `datos` llevan `notificacion` (id), `transportista` (propietario) y los campos del aviso:
+
+| # §15.3 | `tipo` | Tópico | Campos propios de `datos` |
+|---|---|---|---|
+| 1 | `notificacion.levante_otorgado` | `portus/srv/cita` | `manifiesto`, `contenedor`, `canal` (`verde`/`rojo`) |
+| 2 | `notificacion.levante_retenido` | `portus/srv/cita` | `manifiesto`, `contenedor`, `motivo` |
+| 3 | `cita_asignada` | — | Es la confirmación de `/cita`: el bot la guarda ya entregada y no se publica |
+| 4 | `recordatorio_cita` | — | La genera el propio bot 1 h antes (§11.5): `cita`, `contenedor`, `fecha`, `inicio`, `fin` |
+| 5 | `notificacion.vehiculo_retenido` | `portus/srv/retencion` | ver §7 |
+| 6 | `notificacion.retencion_resuelta` | `portus/srv/retencion` | ver §7 |
+| 7 | `notificacion.cita_cancelada` / `notificacion.cita_reprogramada` | `portus/srv/cita` | `cita`, `contenedor`, `fecha`, `inicio`, `fin` (la ventana nueva si se reprogramó) |
+| 8 | `notificacion.turno_completado` | `portus/srv/turno` | `turno`, `vehiculo`, `contenedor`, `tipo_op`, `resultado: "completado"`, `tiempo_total_s` |
+| 9 | `notificacion.turno_anulado` | `portus/srv/turno` | `turno`, `vehiculo`, `contenedor`, `tipo_op`, `resultado: "anulado"`, `motivo` |
+
+- Idempotencia (P-4): el bot descarta un envoltorio con `id` ya visto (reentrega de QoS 1), no encola dos veces la misma fila y omite la que ya está `entregado`.
+- `portus-msg` solo **lee** (ACL); nunca publica.

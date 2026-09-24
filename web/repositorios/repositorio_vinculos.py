@@ -57,13 +57,73 @@ class RepositorioVinculos:
             self._bd.conexion.commit()
 
     def vinculados(self) -> set[int]:
-        """Ids de transportistas con al menos un código consumido (vinculados, §15.1)."""
+        """Ids de transportistas con cuenta de mensajería asociada (§15.1, §15.4)."""
         with self._bd.candado:
             filas = self._bd.conexion.execute(
-                "SELECT DISTINCT transportista_id FROM codigo_vinculacion "
-                "WHERE usado_en IS NOT NULL"
+                "SELECT transportista_id FROM vinculo_mensajeria"
             ).fetchall()
         return {int(fila[0]) for fila in filas}
+
+    # ------------------------------------------------ Etapa 10: vínculo del chat
+
+    def consumir_y_vincular(self, codigo: str, id_chat: int, instante: str) -> int | None:
+        """Consume el código y asocia el chat a su transportista en una transacción.
+
+        El ``UPDATE ... WHERE usado_en IS NULL AND expira_en > ?`` es la
+        garantía de un solo uso: si dos chats envían el mismo código a la vez,
+        solo uno ve ``rowcount == 1`` (§15.1). El chat y el transportista
+        pierden cualquier vínculo previo: una cuenta ↔ un transportista.
+        Devuelve el id del transportista o None si el código ya no sirve.
+        """
+        with self._bd.candado:
+            conexion = self._bd.conexion
+            conexion.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = conexion.execute(
+                    "UPDATE codigo_vinculacion SET usado_en = ? "
+                    "WHERE codigo = ? AND usado_en IS NULL AND expira_en > ?",
+                    (instante, codigo, instante),
+                )
+                if cursor.rowcount != 1:
+                    conexion.rollback()
+                    return None
+                fila = conexion.execute(
+                    "SELECT transportista_id FROM codigo_vinculacion WHERE codigo = ?", (codigo,)
+                ).fetchone()
+                transportista_id = int(fila[0])
+                conexion.execute(
+                    "DELETE FROM vinculo_mensajeria "
+                    "WHERE telegram_chat_id = ? OR transportista_id = ?",
+                    (id_chat, transportista_id),
+                )
+                conexion.execute(
+                    "INSERT INTO vinculo_mensajeria "
+                    "(transportista_id, telegram_chat_id, vinculado_en) VALUES (?, ?, ?)",
+                    (transportista_id, id_chat, instante),
+                )
+                conexion.commit()
+            except Exception:
+                conexion.rollback()
+                raise
+        return transportista_id
+
+    def transportista_de_chat(self, id_chat: int) -> int | None:
+        """Transportista ligado al chat; None si el chat no está vinculado (§15.1 regla 5)."""
+        with self._bd.candado:
+            fila = self._bd.conexion.execute(
+                "SELECT transportista_id FROM vinculo_mensajeria WHERE telegram_chat_id = ?",
+                (id_chat,),
+            ).fetchone()
+        return int(fila[0]) if fila is not None else None
+
+    def chat_de_transportista(self, transportista_id: int) -> int | None:
+        """Chat al que se envían los avisos del transportista (§15.3); None sin vínculo."""
+        with self._bd.candado:
+            fila = self._bd.conexion.execute(
+                "SELECT telegram_chat_id FROM vinculo_mensajeria WHERE transportista_id = ?",
+                (transportista_id,),
+            ).fetchone()
+        return int(fila[0]) if fila is not None else None
 
 
 def _codigo_de_fila(fila: sqlite3.Row) -> CodigoVinculacion:

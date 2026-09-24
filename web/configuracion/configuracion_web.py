@@ -87,7 +87,7 @@ class ConfiguracionWeb:
     @classmethod
     def desde_env(cls, texto_env: str) -> "ConfiguracionWeb":
         """Construye la configuración desde el contenido de un archivo .env."""
-        valores = _parsear_env(texto_env)
+        valores = parsear_env(texto_env)
         return cls(
             ruta_bd=valores.get("RUTA_BD", RUTA_BD_POR_OMISION),
             ruta_esquema=valores.get("RUTA_ESQUEMA", RUTA_ESQUEMA_POR_OMISION),
@@ -124,7 +124,8 @@ class ConfiguracionWeb:
         return NIVEL_POR_NOMBRE.get(self.nivel_registro.upper(), logging.INFO)
 
 
-def _parsear_env(texto_env: str) -> dict[str, str]:
+def parsear_env(texto_env: str) -> dict[str, str]:
+    """Pares CLAVE=VALOR de un .env; ignora vacías y comentarios (lo reusa portus-msg)."""
     valores: dict[str, str] = {}
     for linea in texto_env.splitlines():
         linea = linea.strip()

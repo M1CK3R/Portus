@@ -35,7 +35,18 @@ def id_insertado(cursor: sqlite3.Cursor) -> int:
 class ConexionBd:
     """Abre la base, aplica el esquema y expone conexión + candado (BD-2)."""
 
-    def __init__(self, ruta_bd: str, ruta_esquema: str | Path = RUTA_ESQUEMA_POR_OMISION) -> None:
+    def __init__(
+        self,
+        ruta_bd: str,
+        ruta_esquema: str | Path = RUTA_ESQUEMA_POR_OMISION,
+        aplicar_esquema: bool = True,
+    ) -> None:
+        """Abre la base; ``aplicar_esquema=False`` para un proceso que no es el dueño.
+
+        portus-msg abre la misma base sin reaplicar las migraciones: la
+        recreación de ``manifiesto`` (003) no debe correr desde dos procesos,
+        y portus-web, que arranca antes (§19.2), ya dejó el esquema al día.
+        """
         self._candado = threading.Lock()
         ruta = Path(ruta_bd)
         ruta.parent.mkdir(parents=True, exist_ok=True)
@@ -46,6 +57,12 @@ class ConexionBd:
             raise RuntimeError(mensaje) from error
         # Filas accesibles por nombre de columna; los repositorios cuentan con ello.
         self._conexion.row_factory = sqlite3.Row
+        with self._candado:
+            if not aplicar_esquema:
+                self._conexion.execute("PRAGMA foreign_keys=ON")
+                self._conexion.commit()
+                REGISTRO.info("Conexión lista en %s (esquema a cargo de portus-web)", ruta_bd)
+                return
         esquema_sql = self._leer_esquema(Path(ruta_esquema))
         with self._candado:
             # WAL: el puente escribe eventos mientras la web lee (SPECS §19.2).
