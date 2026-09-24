@@ -1,5 +1,7 @@
 # Secretos y datos locales (G-6)
 config/portus.env
+config/e2e.env
+config/passwd_mosquitto
 *.db
 *.sqlite3
 

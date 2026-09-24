@@ -19,9 +19,9 @@ ignore = ["N818"]
 max-complexity = 10
 
 [tool.ruff.lint.per-file-ignores]
-"pruebas/**" = ["S101", "S106"]
-# S106: los «hashes» de contraseña de las pruebas son cadenas demo intencionales
-# (S-1 prohíbe secretos reales en el repo; aquí no hay ninguno).
+"pruebas/**" = ["S101", "S105", "S106"]
+# S105/S106: los «hashes», contraseñas y tokens de las pruebas son cadenas demo
+# intencionales (S-1 prohíbe secretos reales en el repo; aquí no hay ninguno).
 # Las herramientas de línea de comandos escriben su salida a stdout por diseño.
 "herramientas/**" = ["T201"]
 # Los f-string SQL de los repositorios interpolan SOLO constantes de módulo con
