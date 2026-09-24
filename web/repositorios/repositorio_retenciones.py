@@ -64,6 +64,15 @@ class RepositorioRetenciones:
             ).fetchone()
         return _retencion_de_fila(fila) if fila is not None else None
 
+    def tiene_causa(self, turno_id: int, causa: CausaRetencion) -> bool:
+        """True si el turno ya tuvo (abierta o resuelta) una retención de esa causa."""
+        with self._bd.candado:
+            fila = self._bd.conexion.execute(
+                "SELECT 1 FROM retencion WHERE turno_id = ? AND causa = ? LIMIT 1",
+                (turno_id, causa.value),
+            ).fetchone()
+        return fila is not None
+
     def resolver(
         self,
         retencion_id: int,
@@ -110,6 +119,57 @@ class RepositorioRetenciones:
         sql += " ORDER BY id DESC"
         with self._bd.candado:
             filas = self._bd.conexion.execute(sql, tuple(parametros)).fetchall()
+        return [_retencion_de_fila(fila) for fila in filas]
+
+    def listar_bandeja(
+        self,
+        estado: str | None = None,
+        solo_aduaneras: bool = False,
+        causa: str | None = None,
+    ) -> list[tuple[Retencion, str, str, str]]:
+        """(retención, vehículo, contenedor, tipo_op) para la bandeja §14.3.
+
+        Admite los mismos filtros que ``listar``.
+        """
+        columnas = ", ".join(f"retencion.{c}" for c in COLUMNAS_RETENCION.split(", "))
+        sql = (
+            f"SELECT {columnas}, vehiculo.identificador, manifiesto.contenedor_id, turno.tipo_op "
+            "FROM retencion JOIN turno ON retencion.turno_id = turno.id "
+            "JOIN vehiculo ON turno.vehiculo_id = vehiculo.id "
+            "JOIN manifiesto ON turno.manifiesto_id = manifiesto.id"
+        )
+        condiciones: list[str] = []
+        parametros: list[object] = []
+        if estado is not None:
+            condiciones.append("retencion.estado = ?")
+            parametros.append(estado)
+        if solo_aduaneras:
+            condiciones.append("retencion.causa IN ('RT03', 'RT05')")
+        if causa is not None:
+            condiciones.append("retencion.causa = ?")
+            parametros.append(causa)
+        if condiciones:
+            sql += " WHERE " + " AND ".join(condiciones)
+        sql += " ORDER BY retencion.id DESC"
+        with self._bd.candado:
+            filas = self._bd.conexion.execute(sql, tuple(parametros)).fetchall()
+        return [
+            (_retencion_de_fila(fila), str(fila[14]), str(fila[15]), str(fila[16]))
+            for fila in filas
+        ]
+
+    def abiertas_sin_alerta(self, creadas_hasta: str) -> list[Retencion]:
+        """Abiertas creadas en o antes de ``creadas_hasta`` que aún no generaron AL12 (§13.1)."""
+        columnas = ", ".join(f"retencion.{c}" for c in COLUMNAS_RETENCION.split(", "))
+        with self._bd.candado:
+            filas = self._bd.conexion.execute(
+                f"SELECT {columnas} FROM retencion "
+                "LEFT JOIN alerta_emitida ON alerta_emitida.codigo = 'AL12' "
+                "AND alerta_emitida.clave = CAST(retencion.id AS TEXT) "
+                "WHERE retencion.estado = 'abierta' AND retencion.creada_en <= ? "
+                "AND alerta_emitida.clave IS NULL ORDER BY retencion.id",
+                (creadas_hasta,),
+            ).fetchall()
         return [_retencion_de_fila(fila) for fila in filas]
 
     def resueltas_en_rango(self, inicio: str, fin: str) -> list[tuple[str, str, str, str]]:

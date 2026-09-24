@@ -76,6 +76,11 @@ def transicion_valida(actual: "EstadoTurno | str", nuevo: "EstadoTurno | str") -
     return EstadoTurno(nuevo) in TRANSICIONES_PERMITIDAS[EstadoTurno(actual)]
 
 
+def puede_retenerse(estado: "EstadoTurno | str") -> bool:
+    """True si §8.1 admite ``Retenido`` desde ese estado (RT05/RT06 «en cualquier momento»)."""
+    return transicion_valida(estado, EstadoTurno.RETENIDO)
+
+
 def estado_de_regreso(estado_previo: str) -> EstadoTurno:
     """Estado al que vuelve un turno retenido tras Aclarar o Corregir (A2, §8.5).
 

@@ -14,21 +14,22 @@ from collections.abc import Callable
 from datetime import datetime
 
 from web.modelos.alarma import CodigoAlarma
+from web.modelos.notificacion import TipoNotificacion
 from web.modelos.turno import EstadoTurno, Turno
-from web.repositorios.repositorio_alarmas import RepositorioAlarmas
 from web.repositorios.repositorio_citas import RepositorioCitas
 from web.repositorios.repositorio_manifiestos import RepositorioManifiestos
-from web.repositorios.repositorio_notificaciones import RepositorioNotificaciones
 from web.repositorios.repositorio_turnos import RepositorioTurnos
 from web.repositorios.repositorio_vehiculos import RepositorioVehiculos
+from web.servicios.emisor_alarmas import EmisorAlarmas
+from web.servicios.notificador import Notificador
 from web.servicios.puertos import PublicadorLogica
+from web.servicios.servicio_trabajos import ServicioTrabajos
 from web.servicios.servicio_turnos import ServicioTurnos
-from web.tiempo import marca_utc
+from web.tiempo import instante_de_marca, marca_utc
 
 REGISTRO = logging.getLogger(__name__)
 
 TOPICO_SRV_TURNO = "portus/srv/turno"
-TIPO_NOTIFICACION_CIERRE = "notificacion.turno_cerrado"
 
 CMD_ABRIR_PUERTA_SALIDA = "AbrirPuertaSalida"
 SAL_DETECTADO = "DETECTADO"
@@ -44,9 +45,10 @@ class ServicioSalida:
         turnos_repo: RepositorioTurnos,
         manifiestos: RepositorioManifiestos,
         citas: RepositorioCitas,
-        notificaciones: RepositorioNotificaciones,
-        alarmas: RepositorioAlarmas,
+        notificador: Notificador,
+        alarmas: EmisorAlarmas,
         maquina: ServicioTurnos,
+        trabajos: ServicioTrabajos,
         publicador: PublicadorLogica,
         fabrica_instante: Callable[[], datetime],
     ) -> None:
@@ -54,9 +56,10 @@ class ServicioSalida:
         self._turnos_repo = turnos_repo
         self._manifiestos = manifiestos
         self._citas = citas
-        self._notificaciones = notificaciones
-        self._alarmas_repo = alarmas
+        self._notificador = notificador
+        self._alarmas = alarmas
         self._maquina = maquina
+        self._trabajos = trabajos
         self._publicador = publicador
         self._fabrica_instante = fabrica_instante
 
@@ -114,9 +117,12 @@ class ServicioSalida:
     def autorizar_salida_anulacion(self, turno: Turno) -> None:
         """Anulación: salida autorizada sin completar la operación (§8.2 regla 4, §8.6.3).
 
-        El inventario conserva la posición física real (lo confirman los PAT);
-        la notificación 9 sale por el mismo canal que el cierre (§15.3).
+        Sirve a la anulación manual y a Rechazar (§10.3). La cola de grúa del
+        turno se cancela y sus reservas se liberan, así el inventario conserva
+        la posición física real (§12.3); la notificación 9 lleva la causa de
+        anulación y sale por el mismo canal que el cierre (§15.3).
         """
+        self._trabajos.cancelar_pendientes(turno)
         self._publicador.publicar_comando(CMD_ABRIR_PUERTA_SALIDA, {}, "servidor")
         self._maquina.registrar_evento(
             turno,
@@ -125,22 +131,8 @@ class ServicioSalida:
             valores={"vehiculo_id": turno.vehiculo_id},
             origen="servidor",
         )
-        manifiesto = self._manifiestos.buscar_por_id(turno.manifiesto_id)
-        transportista_id = (
-            manifiesto.transportista_id if manifiesto is not None else turno.vehiculo_id
-        )
-        payload: dict[str, object] = {
-            "turno": turno.id,
-            "contenedor": manifiesto.contenedor_id if manifiesto is not None else "",
-            "resultado": "anulado",
-        }
-        self._notificaciones.crear(
-            transportista_id, "turno_anulado", payload, marca_utc(self._fabrica_instante())
-        )
-        self._publicador.publicar(
-            TOPICO_SRV_TURNO,
-            TIPO_NOTIFICACION_CIERRE,
-            {**payload, "transportista": transportista_id},
+        self._notificar_fin(
+            turno, TipoNotificacion.TURNO_ANULADO, {"motivo": turno.motivo_anulacion}
         )
 
     def _turno_en_salida(self, identificador: str) -> Turno | None:
@@ -155,43 +147,37 @@ class ServicioSalida:
 
     def _alarmar_al10(self, identificador: str, detalle: str) -> None:
         """AL10: el servidor genera la alarma y no autoriza la salida (§8.6, §13.1)."""
-        ts = marca_utc(self._fabrica_instante())
-        datos: dict[str, object] = {"vehiculo": identificador, "detalle": detalle}
-        self._alarmas_registrar(datos, ts)
-        self._publicador.publicar(
-            "portus/srv/alarma", "alarma.servidor", {"codigo": CodigoAlarma.AL10.value, **datos}
-        )
-        REGISTRO.warning(
-            "AL10: vehículo incorrecto en la salida ('%s'): %s", identificador, detalle
-        )
-
-    def _alarmas_registrar(self, datos: dict[str, object], ts: str) -> None:
-        """Persistencia de AL10 en la tabla de alarmas (§13.2)."""
-        self._alarmas_repo.registrar(
-            CodigoAlarma.AL10.value,
-            "MEDIA",
-            "servidor",
-            "Vehículo incorrecto en la salida",
-            datos,
-            ts,
-        )
+        self._alarmas.emitir(CodigoAlarma.AL10, {"vehiculo": identificador, "detalle": detalle})
 
     def _notificar_cierre(self, turno: Turno) -> None:
-        """Notificación 8 al transportista: operación completada (§8.6, §15.3)."""
-        manifiesto = self._manifiestos.buscar_por_id(turno.manifiesto_id)
-        transportista_id = (
-            manifiesto.transportista_id if manifiesto is not None else turno.vehiculo_id
+        """Notificación 8: operación completada con su tiempo total en terminal (§15.3)."""
+        fin = turno.cerrado_en or marca_utc(self._fabrica_instante())
+        tiempo_total_s = (
+            instante_de_marca(fin) - instante_de_marca(turno.creado_en)
+        ).total_seconds()
+        self._notificar_fin(
+            turno, TipoNotificacion.TURNO_COMPLETADO, {"tiempo_total_s": int(tiempo_total_s)}
         )
+
+    def _notificar_fin(
+        self, turno: Turno, tipo: TipoNotificacion, extra: dict[str, object]
+    ) -> None:
+        """Avisos 8 y 9: vehículo, contenedor y tipo de operación al propietario (§15.3)."""
+        manifiesto = self._manifiestos.buscar_por_id(turno.manifiesto_id)
+        if manifiesto is None:
+            REGISTRO.error(
+                "Turno %d sin manifiesto %d: no hay propietario a quien notificar",
+                turno.id,
+                turno.manifiesto_id,
+            )
+            return
+        vehiculo = self._vehiculos.buscar_por_id(turno.vehiculo_id)
         payload: dict[str, object] = {
             "turno": turno.id,
-            "contenedor": manifiesto.contenedor_id if manifiesto is not None else "",
-            "resultado": "completado",
+            "vehiculo": vehiculo.identificador if vehiculo is not None else "",
+            "contenedor": manifiesto.contenedor_id,
+            "tipo_op": turno.tipo_op,
+            "resultado": "completado" if tipo is TipoNotificacion.TURNO_COMPLETADO else "anulado",
+            **extra,
         }
-        self._notificaciones.crear(
-            transportista_id, "turno_completado", payload, marca_utc(self._fabrica_instante())
-        )
-        self._publicador.publicar(
-            TOPICO_SRV_TURNO,
-            TIPO_NOTIFICACION_CIERRE,
-            {**payload, "transportista": transportista_id},
-        )
+        self._notificador.notificar(TOPICO_SRV_TURNO, manifiesto.transportista_id, tipo, payload)

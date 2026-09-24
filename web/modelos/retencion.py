@@ -55,6 +55,9 @@ CAUSAS_ADUANERAS: frozenset[CausaRetencion] = frozenset({CausaRetencion.RT03, Ca
 CAUSAS_DE_PESO: frozenset[CausaRetencion] = frozenset({CausaRetencion.RT01, CausaRetencion.RT02})
 """Únicas con evidencia de peso y con sentido para Corregir (A12, §10.4)."""
 
+CAUSAS_ORDENABLES: frozenset[CausaRetencion] = frozenset({CausaRetencion.RT05, CausaRetencion.RT06})
+"""Las que un usuario ordena «en cualquier momento» (§10.2); las demás las detecta el sistema."""
+
 
 class ResolucionRetencion(StrEnum):
     """Las tres resoluciones exactas del SPECS §10.3."""
@@ -78,6 +81,32 @@ def puede_resolver(rol: Rol, causa: CausaRetencion, resolucion: ResolucionRetenc
     return True
 
 
+def compara_con_manifiesto(causa: CausaRetencion, tipo_op: str) -> bool:
+    """True si el pesaje de esa causa se comparó con el peso del manifiesto (A4 [DEC]).
+
+    DEPOSITO entra cargado (RT01 contra el manifiesto) y sale vacío (RT02
+    contra la tara); RETIRO al revés. Corregir solo tiene sentido contra el
+    manifiesto: contra la tara sustituiría el peso del contenedor por el del
+    camión vacío.
+    """
+    return (causa is CausaRetencion.RT01 and tipo_op == "DEPOSITO") or (
+        causa is CausaRetencion.RT02 and tipo_op == "RETIRO"
+    )
+
+
+def puede_ordenar(rol: Rol, causa: CausaRetencion) -> bool:
+    """RT05 la ordena solo AUTORIDAD y RT06 solo TERMINAL (§10.2, A9)."""
+    return causa in CAUSAS_ORDENABLES and rol is rol_facultado(causa)
+
+
+def calcular_diferencia_pct(peso_medido_g: int, peso_declarado_g: int) -> float:
+    """Diferencia porcentual respecto al peso declarado (SPECS §10.4)."""
+    if peso_declarado_g <= 0:
+        mensaje = f"peso_declarado_g debe ser mayor que 0 (recibido: {peso_declarado_g})"
+        raise ValueError(mensaje)
+    return abs(peso_medido_g - peso_declarado_g) / peso_declarado_g * 100
+
+
 @dataclass(frozen=True)
 class Retencion:
     """Fila de ``retencion`` del dominio (§17.1); el consecutivo único es ``id``."""
@@ -96,3 +125,42 @@ class Retencion:
     resuelta_por: int | None = None
     creada_en: str = ""
     resuelta_en: str | None = None
+
+
+@dataclass(frozen=True)
+class EvidenciaPeso:
+    """Evidencia de peso de RT01/RT02 con las fórmulas del §10.4."""
+
+    peso_declarado_g: int
+    peso_medido_g: int
+    diferencia_abs_g: int
+    diferencia_pct: float
+
+
+@dataclass(frozen=True)
+class FilaBandejaRetencion:
+    """Fila de la bandeja §14.3: la retención con su turno, vehículo, contenedor y rol."""
+
+    retencion: Retencion
+    vehiculo: str
+    contenedor_id: str
+    rol_facultado: Rol
+    evidencia: EvidenciaPeso | None
+    corregible: bool
+    """Corregir aplica: causa de peso comparada con el manifiesto (A12, A4)."""
+
+
+def evidencia_de(retencion: Retencion) -> EvidenciaPeso | None:
+    """Evidencia §10.4 solo para causas de peso con ambos pesos registrados."""
+    declarado = retencion.peso_declarado_g
+    medido = retencion.peso_medido_g
+    if retencion.causa not in CAUSAS_DE_PESO or declarado is None or medido is None:
+        return None
+    if declarado <= 0:
+        return None
+    return EvidenciaPeso(
+        peso_declarado_g=declarado,
+        peso_medido_g=medido,
+        diferencia_abs_g=abs(medido - declarado),
+        diferencia_pct=round(calcular_diferencia_pct(medido, declarado), 2),
+    )

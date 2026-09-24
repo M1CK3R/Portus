@@ -134,15 +134,45 @@ class RepositorioInventario:
 
     def reservar(self, posicion_id: str) -> None:
         """Marca la posición como ``reservada`` al asignarla (§12.3: solo pasa a
-        ocupada con la confirmación física del controlador)."""
+        ocupada con la confirmación física del controlador).
+
+        Una posición ``ocupada`` también se reserva: la política asigna el
+        nivel 2 sobre un nivel 1 ocupado (apilado, §12.1). Reservada o
+        bloqueada no, para que dos turnos no reciban la misma celda.
+        """
         with self._bd.candado:
             cursor = self._bd.conexion.execute(
-                "UPDATE posicion_patio SET estado = 'reservada' WHERE id = ? AND estado = 'libre'",
+                "UPDATE posicion_patio SET estado = 'reservada' "
+                "WHERE id = ? AND estado IN ('libre', 'ocupada')",
                 (posicion_id,),
             )
             if cursor.rowcount != 1:
                 raise ValueError(f"la posición '{posicion_id}' no está libre para reservar")
             self._bd.conexion.commit()
+
+    def liberar_reserva(self, posicion_id: str) -> str | None:
+        """Deshace la reserva de un trabajo cancelado; devuelve el estado nuevo (§12.3).
+
+        La posición vuelve a lo que el inventario confirmado dice: ``ocupada``
+        si aún tiene contenedores, ``libre`` si no. None si no estaba reservada.
+        """
+        with self._bd.candado:
+            conexion = self._bd.conexion
+            conexion.execute("BEGIN IMMEDIATE")
+            try:
+                ocupantes = conexion.execute(
+                    "SELECT COUNT(*) FROM inventario WHERE posicion = ?", (posicion_id,)
+                ).fetchone()[0]
+                estado = "ocupada" if int(ocupantes) > 0 else "libre"
+                cursor = conexion.execute(
+                    "UPDATE posicion_patio SET estado = ? WHERE id = ? AND estado = 'reservada'",
+                    (estado, posicion_id),
+                )
+                conexion.commit()
+            except Exception:
+                conexion.rollback()
+                raise
+        return estado if cursor.rowcount == 1 else None
 
     def confirmar_ocupacion(
         self, contenedor_id: str, posicion_id: str, nivel: int, ingreso_en: str
