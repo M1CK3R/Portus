@@ -47,8 +47,22 @@
     "rol_facultado": {"RT01": "TERMINAL", "RT02": "TERMINAL", "RT03": "AUTORIDAD", "RT04": "TERMINAL", "RT05": "AUTORIDAD", "RT06": "TERMINAL"},
     "resoluciones": ["ACLARAR", "CORREGIR", "RECHAZAR"]
   },
-  "alarmas_servidor": {
-    "AL09": "MEDIA", "AL10": "MEDIA", "AL11": "MEDIA", "AL14": "BAJA"
+  "alarmas": {
+    "nota": "Catálogo SPECS §13.1: severidad y origen. El firmware envía ALM solo con los de origen controlador (AL02-AL08); web/modelos/alarma.py debe coincidir.",
+    "AL01": {"severidad": "CRITICA", "origen": "servidor"},
+    "AL02": {"severidad": "CRITICA", "origen": "controlador"},
+    "AL03": {"severidad": "CRITICA", "origen": "controlador"},
+    "AL04": {"severidad": "CRITICA", "origen": "controlador"},
+    "AL05": {"severidad": "ALTA", "origen": "controlador"},
+    "AL06": {"severidad": "ALTA", "origen": "controlador"},
+    "AL07": {"severidad": "ALTA", "origen": "controlador"},
+    "AL08": {"severidad": "ALTA", "origen": "controlador"},
+    "AL09": {"severidad": "MEDIA", "origen": "servidor"},
+    "AL10": {"severidad": "MEDIA", "origen": "servidor"},
+    "AL11": {"severidad": "MEDIA", "origen": "servidor"},
+    "AL12": {"severidad": "MEDIA", "origen": "servidor"},
+    "AL13": {"severidad": "BAJA", "origen": "servidor"},
+    "AL14": {"severidad": "BAJA", "origen": "servidor"}
   },
   "comandos": [
     "AbrirTalanquera",

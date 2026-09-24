@@ -90,6 +90,36 @@ El SPECS §5.2 fija la conversión de `PES` (`veh` → `veh`, `g` → `peso_g`, 
 
 Los enteros se convierten solo si el texto es numérico; si no, el valor viaja como texto y la anomalía queda en el registro (CODESTYLE D-10).
 
+Uso en las métricas (docs/metricas.md): `EST.espera` es la **fuente de la fila de espera** (A15, métrica 6) y el firmware debe informarla con el conteo real de la zona de espera. `GRU` no lleva distancia: la distancia de traslación (métrica 3) la deriva el servidor en posiciones del patio (A16).
+
+#### 3.1.1 Vocabulario de valores [DEC]
+
+Valores que el sinóptico (SPECS §14.1) traduce a sus estados; viven en `web/interfaz/estatico/js/sinoptico_textos.mjs`. Un valor fuera de la lista se muestra tal cual, para que la discrepancia con el firmware se vea en pantalla. El firmware (Etapa 2) debe emitir exactamente estos:
+
+| Campo | Valores |
+|---|---|
+| `EST.modo` | `NORMAL` · `MANTENIMIENTO` · `DEGRADADO` |
+| `EST.grua`, `GRU.paso` | `REPOSO` · `REFERENCIANDO` · `DESPLAZANDO` · `IZANDO` · `TRASLADANDO` · `DEPOSITANDO` · `SUSPENDIDA` · `FALLA` (`GRU.paso` también admite `FIN`, con `res` = `OK` o `ABORTADO`) |
+| `EST.aguja`, `AGU.estado` | `RECTA` · `PARQUEO` · `LIBERANDO` |
+| `TRF.evento` | `POSICIONANDO` · `ALINEADO` · `INICIO` · `ABORTO` · `FIN` |
+| `GAR.res` | `ESPERA_AUT` (vehículo presente, validando) |
+| `PAT.estado` | `OCUPADA` · `LIBRE` |
+
+La talanquera y la puerta de salida no tienen evento propio: el sinóptico las deriva de `AUT AUTORIZADO` (abre), del `PES` siguiente (cerró), de `SAL CONFIRMADO` (puerta cerrada) y del `ACK` de `AbrirTalanquera`, `CerrarTalanquera` y `AbrirPuertaSalida`. El estado «en movimiento» exige que el firmware lo reporte (p. ej. campos `tal`/`pue` en `EST`).
+
+#### 3.1.2 Parámetros de `CMD` [DEC]
+
+`portus/cmd/solicitud` lleva `parametros`; el puente los agrega a la trama después de `nombre` (`^SEQ|CMD|nombre=PosicionBloquear,pos=P3#CRC`):
+
+| Comando | Parámetro | Valores |
+|---|---|---|
+| `PosicionBloquear`, `PosicionLiberar` | `pos` | ID de la posición (`P1`…`P4`) |
+| `AgujaLiberar` | `plaza` | `1` · `2` · `3`; sin plaza el controlador responde `NAK PARQUEO_VACIO` |
+| `ModoMantenimiento` | `valor` | `ACTIVAR` · `DESACTIVAR` |
+| Resto | — | Sin parámetros |
+
+La BD solo refleja un bloqueo de posición o la liberación de una plaza cuando llega el `ACK`: el controlador es quien evalúa la condición de rechazo (SPECS §6.1, §23.3).
+
 ### 3.2 Campos de `AUT` y `JOB` [PROP, habilitado en la Etapa 5]
 
 La lógica del servidor publica en `portus/srv/turno` y el puente convierte el mensaje en trama serial (`puente/nucleo_puente._reenviar_aut`/`._reenviar_job`). El envoltorio JSON usa las claves del SPECS §4.4; la trama serial usa claves cortas [DEC]:
@@ -154,6 +184,29 @@ puente                → portus/cmd/respuesta {cmd_id, estado, causa}
 4. **Idempotencia:** si el servidor reenvía el mismo `cmd_id` (reintento), el puente **reutiliza la misma `SEQ`**, de modo que el controlador responde con el mismo resultado sin volver a actuar (SPECS §4.5). Un `cmd_id` duplicado mientras está en vuelo se ignora (QoS 1 puede duplicar la entrega).
 5. **Comando desconocido** (fuera de los 13 del catálogo): NAK inmediato `COMANDO_DESCONOCIDO` sin tocar el serial [DEC; causa añadida a la lista PROP de §6.5].
 6. **Causas de rechazo** (SPECS §6.5): `VEH_BAJO_TALANQUERA`, `VEH_BAJO_PUERTA`, `VEH_SOBRE_AGUJA`, `PARQUEO_VACIO`, `GRUA_CON_CARGA`, `GRUA_EN_TRABAJO`, `GRUA_EN_FALLA`, `POS_EN_TRABAJO`, `INCONSISTENCIA_PERSISTE`, `VEH_EN_TRANSFERENCIA`, `SIN_RESPUESTA` (generada por el puente).
+7. **AL14:** el servidor genera AL14 con la causa y su texto legible ante **todo** NAK, incluido el sintético `SIN_RESPUESTA` (comando fallido, SPECS §4.5); ver `docs/alarmas.md`.
+
+### 5.1 Enclavamientos que debe aplicar el firmware (SPECS §6.1) [referencia]
+
+`herramientas/enclavamientos_simulados.py` implementa esta tabla para el simulador y es la **referencia del firmware** (Etapa 2): con la condición presente se responde `NAK` con la causa y **no se actúa**; sin ella, `ACK` y el efecto. Un `CMD` con `SEQ` repetida recibe la misma respuesta y no vuelve a actuar. `pruebas/test_comandos_etapa9.py` recorre los 13 comandos con y sin su condición.
+
+| Comando | Rechazo (causa) | Efecto con ACK |
+|---|---|---|
+| `AbrirTalanquera` / `CerrarTalanquera` | vehículo bajo la talanquera (`VEH_BAJO_TALANQUERA`) | abre / cierra |
+| `AbrirPuertaSalida` | vehículo bajo la puerta (`VEH_BAJO_PUERTA`) | abre |
+| `AgujaRecta` / `AgujaParqueo` | vehículo sobre la aguja (`VEH_SOBRE_AGUJA`) | aguja recta / hacia el parqueo |
+| `AgujaLiberar` (`plaza`) | vehículo sobre la aguja (`VEH_SOBRE_AGUJA`) o parqueo vacío (`PARQUEO_VACIO`) | aguja de liberación |
+| `GruaReferenciar` | carga adherida (`GRUA_CON_CARGA`) o trabajo en ejecución (`GRUA_EN_TRABAJO`) | referenciado |
+| `GruaSuspender` | **nunca** | termina el movimiento en curso y no toma trabajos |
+| `GruaReanudar` | falla sin rearme (`GRUA_EN_FALLA`) | vuelve a tomar trabajos |
+| `PosicionBloquear` (`pos`) | origen o destino del trabajo en ejecución (`POS_EN_TRABAJO`) | posición bloqueada |
+| `PosicionLiberar` (`pos`) | la inconsistencia física persiste (`INCONSISTENCIA_PERSISTE`) | posición liberada |
+| `ModoMantenimiento` (`valor`) | trabajo en ejecución (`GRUA_EN_TRABAJO`) o vehículo en transferencia (`VEH_EN_TRANSFERENCIA`) | activa/desactiva; en mantenimiento no se admiten trabajos de turnos pero sí `GruaReferenciar` (§6.2 regla 4) |
+| `AlarmaSilenciar` | **nunca** | silencia la sirena sin reconocer alarmas |
+
+El latido `EST` refleja el efecto: `grua=SUSPENDIDA|REPOSO|FALLA` y `modo=MANTENIMIENTO`. El servidor usa ese latido para la disponibilidad de §6.3 (Reanudar solo con grúa suspendida; Referenciar solo en reposo o suspendida) y responde **409 `COMANDO_NO_DISPONIBLE`** sin enviar el comando; sin latido todavía, decide el controlador.
+
+En la consola del simulador (`--interactivo`), `sensor NOMBRE VALOR` fija la condición física (`talanquera|puerta|aguja|transferencia|carga|falla 1/0`, `parqueo N`, `trabajo P3|0`, `inconsistencia P2|0`) y `estado` la muestra.
 
 ## 6. Vigilancia del latido (SPECS §5.4, §3.4)
 
@@ -179,3 +232,4 @@ Todos en `config/portus.env` (ver `config/portus.env.ejemplo`): `PUERTO_SERIE`, 
 | `pruebas/test_vigilante_latido.py` | Umbral de 3 periodos, AL01, retroactiva A14 |
 | `pruebas/test_paridad_constantes.py` | Paridad firmware–puente (P-2) |
 | `pruebas/test_integracion_simulador.py` | Ciclo completo sobre PTY sin maqueta ni broker |
+| `pruebas/test_comandos_etapa9.py` | Los 13 comandos: NAK sin efecto con su condición, ACK sin ella, idempotencia por SEQ, AL14 y disponibilidad §6.3 |

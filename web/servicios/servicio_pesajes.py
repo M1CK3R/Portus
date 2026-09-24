@@ -20,13 +20,13 @@ from datetime import datetime
 
 from web.modelos.alarma import CodigoAlarma
 from web.modelos.datos_manifiesto import DatosManifiesto
-from web.modelos.retencion import CausaRetencion
+from web.modelos.retencion import CausaRetencion, calcular_diferencia_pct
 from web.modelos.turno import EstadoTurno, Turno
-from web.repositorios.repositorio_alarmas import RepositorioAlarmas
 from web.repositorios.repositorio_manifiestos import RepositorioManifiestos
 from web.repositorios.repositorio_pesajes import RepositorioPesajes
 from web.repositorios.repositorio_turnos import RepositorioTurnos
 from web.repositorios.repositorio_vehiculos import RepositorioVehiculos
+from web.servicios.emisor_alarmas import EmisorAlarmas
 from web.servicios.puertos import PublicadorLogica
 from web.servicios.servicio_retenciones import ServicioRetenciones
 from web.servicios.servicio_turnos import ServicioTurnos
@@ -34,21 +34,11 @@ from web.tiempo import marca_utc
 
 REGISTRO = logging.getLogger(__name__)
 
-TOPICO_SRV_ALARMA = "portus/srv/alarma"
-TIPO_ALARMA_SERVIDOR = "alarma.servidor"
 
 PESO_DE_TARA = "tara"
 PESO_NETO = "neto"
 ESTACION_PESAJE_ENTRADA = "pesaje_entrada"
 ESTACION_PESAJE_SALIDA = "pesaje_salida"
-
-
-def calcular_diferencia_pct(peso_medido_g: int, peso_declarado_g: int) -> float:
-    """Diferencia porcentual respecto al peso declarado (SPECS §10.4)."""
-    if peso_declarado_g <= 0:
-        mensaje = f"peso_declarado_g debe ser mayor que 0 (recibido: {peso_declarado_g})"
-        raise ValueError(mensaje)
-    return abs(peso_medido_g - peso_declarado_g) / peso_declarado_g * 100
 
 
 class ServicioPesajes:
@@ -64,7 +54,7 @@ class ServicioPesajes:
         retenciones: ServicioRetenciones,
         publicador: PublicadorLogica,
         fabrica_instante: Callable[[], datetime],
-        alarmas: RepositorioAlarmas,
+        alarmas: EmisorAlarmas,
     ) -> None:
         self._vehiculos = vehiculos
         self._manifiestos = manifiestos
@@ -204,24 +194,13 @@ class ServicioPesajes:
 
     def _alarmar_al09(self, referencia_g: int, comparado_g: int, diferencia_pct: float) -> None:
         """AL09 (media, origen servidor) persistida y publicada (§13.1, §13.2)."""
-        datos_alarma: dict[str, object] = {
-            "referencia_g": referencia_g,
-            "comparado_g": comparado_g,
-            "diferencia_pct": round(diferencia_pct, 2),
-        }
-        ts = marca_utc(self._fabrica_instante())
-        self._alarmas.registrar(
-            CodigoAlarma.AL09.value,
-            "MEDIA",
-            "servidor",
-            "Pesaje fuera de tolerancia",
-            datos_alarma,
-            ts,
-        )
-        self._publicador.publicar(
-            TOPICO_SRV_ALARMA,
-            TIPO_ALARMA_SERVIDOR,
-            {"codigo": CodigoAlarma.AL09.value, **datos_alarma},
+        self._alarmas.emitir(
+            CodigoAlarma.AL09,
+            {
+                "referencia_g": referencia_g,
+                "comparado_g": comparado_g,
+                "diferencia_pct": round(diferencia_pct, 2),
+            },
         )
 
     # -------------------------------------------------------------- elementos

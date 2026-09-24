@@ -153,7 +153,8 @@ def test_ciclo_completo_con_simulador_sobre_pty(tmp_path, canal_pty):
         assert datos["cmd_id"] == "e2e-cmd-1"
         assert datos["estado"] == "ACK"
 
-        # 4. Comando con condición de rechazo simulada: NAK con causa exacta.
+        # 4. Comando con su condición de rechazo presente: NAK con causa exacta.
+        simulador.fijar_sensor("talanquera", "1")
         solicitud_nak = json.dumps(
             {
                 "id": "cmd-e2e-2",

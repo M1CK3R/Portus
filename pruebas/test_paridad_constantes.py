@@ -38,6 +38,7 @@ from puente.protocolo import (
     TIPOS_SERVIDOR,
     calcular_crc16,
 )
+from web.modelos.alarma import DEFINICIONES
 
 RUTA_CONSTANTES = Path("docs/constantes_protocolo.json")
 
@@ -71,6 +72,18 @@ def test_estados_de_respuesta_y_severidades_coinciden():
     constantes = _constantes()
     assert {ESTADO_ACK, ESTADO_NAK} == set(constantes["estados_respuesta"])
     assert constantes["severidades_alarma"] == ["CRITICA", "ALTA", "MEDIA", "BAJA"]
+
+
+def test_catalogo_de_alarmas_coincide_con_la_fuente_compartida():
+    """AL01-AL14 con la severidad y el origen de §13.1, igual en web y firmware (P-2)."""
+    compartido = {
+        codigo: (valores["severidad"], valores["origen"])
+        for codigo, valores in _constantes()["alarmas"].items()
+        if codigo != "nota"
+    }
+    web = {d.codigo.value: (d.severidad.value, d.origen) for d in DEFINICIONES.values()}
+    assert web == compartido
+    assert len(web) == 14
 
 
 def test_topicos_del_espacio_obligatorio_coinciden_con_la_fuente_compartida():

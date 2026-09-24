@@ -68,10 +68,10 @@ class RepositorioAlarmas:
 
         ``severidad`` filtra (§13.3: filtro por severidad); None lista todas.
         """
-        return self._listar("WHERE estado = 'activa'", severidad=severidad)
+        return self._listar("WHERE alarma.estado = 'activa'", severidad=severidad)
 
     def historicas(self, severidad: str | None = None) -> list[Alarma]:
-        return self._listar("WHERE estado = 'reconocida'", severidad=severidad)
+        return self._listar("WHERE alarma.estado = 'reconocida'", severidad=severidad)
 
     def reconocer(self, alarma_id: int, usuario_id: int, comentario: str | None, ts: str) -> bool:
         """Pasa una alarma activa a reconocida (§13.2); False si ya estaba o no existe."""
@@ -99,20 +99,57 @@ class RepositorioAlarmas:
             self._bd.conexion.commit()
         return cursor.rowcount
 
-    def fallas_de_grua(self) -> list[Alarma]:
-        """Historial de fallas de la grúa (§12.6): AL03, AL04, AL05, AL06."""
-        return self._listar("WHERE codigo IN ('AL03', 'AL04', 'AL05', 'AL06')")
+    def cantidad_activas(self) -> int:
+        """Alarmas activas (filas, no repeticiones) para el contador del sinóptico (§14.1)."""
+        with self._bd.candado:
+            fila = self._bd.conexion.execute(
+                "SELECT COUNT(*) FROM alarma WHERE estado = 'activa'"
+            ).fetchone()
+        return int(fila[0])
 
-    def _listar(self, condicion: str, severidad: str | None = None) -> list[Alarma]:
-        parametros: tuple[object, ...] = ()
-        if severidad is not None:
-            condicion = f"{condicion} AND severidad = ?"
-            parametros = (severidad,)
+    def buscar_por_id(self, alarma_id: int) -> Alarma | None:
+        filas = self._listar("WHERE alarma.id = ?", parametros=(alarma_id,))
+        return filas[0] if filas else None
+
+    def registrar_alerta(self, codigo: str, clave: str, alarma_id: int, ts: str) -> bool:
+        """Marca que el objeto ``clave`` ya generó su AL12/AL13; False si ya lo había hecho."""
+        with self._bd.candado:
+            cursor = self._bd.conexion.execute(
+                "INSERT OR IGNORE INTO alerta_emitida (codigo, clave, alarma_id, ts) "
+                "VALUES (?, ?, ?, ?)",
+                (codigo, clave, alarma_id, ts),
+            )
+            self._bd.conexion.commit()
+        return cursor.rowcount > 0
+
+    def claves_alertadas(self, codigo: str) -> set[str]:
+        """Objetos que ya generaron la alarma periódica ``codigo`` (AL12/AL13)."""
         with self._bd.candado:
             filas = self._bd.conexion.execute(
-                "SELECT id, codigo, severidad, origen, descripcion, datos, "
-                "repeticiones, estado, ts, reconocida_por, reconocida_ts "
-                f"FROM alarma {condicion} ORDER BY id DESC",
+                "SELECT clave FROM alerta_emitida WHERE codigo = ?", (codigo,)
+            ).fetchall()
+        return {str(fila[0]) for fila in filas}
+
+    def fallas_de_grua(self) -> list[Alarma]:
+        """Historial de fallas de la grúa (§12.6): AL03, AL04, AL05, AL06."""
+        return self._listar("WHERE alarma.codigo IN ('AL03', 'AL04', 'AL05', 'AL06')")
+
+    def _listar(
+        self,
+        condicion: str,
+        severidad: str | None = None,
+        parametros: tuple[object, ...] = (),
+    ) -> list[Alarma]:
+        if severidad is not None:
+            condicion = f"{condicion} AND alarma.severidad = ?"
+            parametros = (*parametros, severidad)
+        with self._bd.candado:
+            filas = self._bd.conexion.execute(
+                "SELECT alarma.id, codigo, severidad, origen, descripcion, datos, "
+                "repeticiones, estado, ts, reconocida_por, reconocida_ts, comentario, "
+                "usuario.username FROM alarma "
+                "LEFT JOIN usuario ON usuario.id = alarma.reconocida_por "
+                f"{condicion} ORDER BY alarma.id DESC",
                 parametros,
             ).fetchall()
         return [_alarma_de_fila(fila) for fila in filas]
@@ -132,4 +169,6 @@ def _alarma_de_fila(fila: sqlite3.Row) -> Alarma:
         ts=str(fila[8]),
         reconocida_por=None if reconocida_por is None else int(reconocida_por),
         reconocida_ts=cast(str | None, fila[10]),
+        comentario=cast(str | None, fila[11]),
+        reconocida_por_usuario=cast(str | None, fila[12]),
     )
