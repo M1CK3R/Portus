@@ -75,10 +75,10 @@ def _contrasena_de(nombre_rol: str, opcion: str, argumentos: argparse.Namespace)
 
 def main() -> int:
     argumentos = _leer_argumentos()
-    opciones: dict[str, str] = {}
     if argumentos.esquema is not None:
-        opciones["ruta_esquema"] = argumentos.esquema
-    bd = ConexionBd(argumentos.bd, **opciones)
+        bd = ConexionBd(argumentos.bd, argumentos.esquema)
+    else:
+        bd = ConexionBd(argumentos.bd)
     repositorio = RepositorioUsuarios(bd)
     ahora = marca_utc()
     credenciales: list[tuple[str, str]] = []

@@ -18,8 +18,13 @@ import sqlite3
 import sys
 
 CONTENEDORES = ["C01", "C02", "C03", "C04"]
-VEHICULOS = [("V01", 1, 900), ("V02", 1, 950), ("V03", 2, 880)]
-"""(identificador, transportista_id del usuario semilla, tara_g)."""
+VEHICULOS = [
+    ("V01", "transportista01", 950),
+    ("V02", "transportista01", 950),
+    ("V03", "transportista02", 880),
+]
+"""(identificador, username del transportista semilla, tara_g); la tara de V01
+coincide con la del simulador (PES de salida 950 g)."""
 
 POSICIONES = ["P1", "P2", "P3", "P4"]
 
@@ -33,11 +38,22 @@ def crear(ruta_bd: str) -> None:
                     "INSERT OR IGNORE INTO contenedor (id, descripcion) VALUES (?, ?)",
                     (contenedor, f"Contenedor de la maqueta {contenedor}"),
                 )
-            for identificador, transportista_id, tara_g in VEHICULOS:
+            for identificador, username, tara_g in VEHICULOS:
+                # El dueño se resuelve por username: los ids dependen del orden de alta.
+                fila = conexion.execute(
+                    "SELECT id FROM usuario WHERE username = ? AND rol = 'TRANSPORTISTA'",
+                    (username,),
+                ).fetchone()
+                if fila is None:
+                    sys.stderr.write(
+                        f"Vehículo {identificador} omitido: no existe el transportista "
+                        f"'{username}' (corra antes crear_usuarios_semilla)\n"
+                    )
+                    continue
                 conexion.execute(
                     "INSERT OR IGNORE INTO vehiculo (identificador, transportista_id, tara_g) "
                     "VALUES (?, ?, ?)",
-                    (identificador, transportista_id, tara_g),
+                    (identificador, int(fila[0]), tara_g),
                 )
             for posicion in POSICIONES:
                 conexion.execute(

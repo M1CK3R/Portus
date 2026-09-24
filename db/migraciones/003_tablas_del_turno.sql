@@ -182,6 +182,8 @@ CREATE TABLE IF NOT EXISTS plaza_parqueo (
 );
 
 -- Semilla estructural del parqueo (§10.1: plazas 1–3 administradas en lógico).
+-- Idempotente: db/esquema.sql se ejecuta en cada arranque del puente (BD-2),
+-- y la fila ya existente con su turno asignado no debe tocarse.
 INSERT OR IGNORE INTO plaza_parqueo (numero, turno_id, ocupada_desde)
     VALUES (1, NULL, NULL), (2, NULL, NULL), (3, NULL, NULL);
 

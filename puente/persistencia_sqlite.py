@@ -38,7 +38,7 @@ class PersistenciaSqlite:
     def __init__(self, ruta_bd: str, ruta_esquema: str | Path = RUTA_ESQUEMA_POR_OMISION) -> None:
         self._candado = threading.Lock()
         try:
-            self._conexion = sqlite3.connect(ruta_bd, check_same_thread=False)
+            self._conexion = sqlite3.connect(ruta_bd, check_same_thread=False, timeout=30)
         except sqlite3.Error as error:
             mensaje = f"no se pudo abrir la base de datos '{ruta_bd}': {error}"
             raise RuntimeError(mensaje) from error
