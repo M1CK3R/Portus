@@ -1,0 +1,6 @@
+# Los scripts y archivos que leen sh y mosquitto dentro de los contenedores
+# deben quedar con fin de línea LF aunque se clone en Windows (docs/docker.md).
+*.sh text eol=lf
+docker/** text eol=lf
+Dockerfile text eol=lf
+docker-compose.yml text eol=lf

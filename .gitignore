@@ -2,6 +2,7 @@
 config/portus.env
 config/e2e.env
 config/passwd_mosquitto
+.env
 *.db
 *.sqlite3
 

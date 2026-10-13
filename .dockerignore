@@ -1,0 +1,31 @@
+# Lo que NO entra a la imagen (Dockerfile). Los secretos y la base se montan
+# desde el host en tiempo de ejecución, nunca se copian (S-1).
+.git
+.gitignore
+.dockerignore
+Dockerfile
+docker-compose.yml
+venv/
+.venv/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.vscode/
+.idea/
+.kilo/
+.opencode/
+
+config/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3
+
+docs/
+pruebas/
+src/
+docker/
+*.md
+*.sh

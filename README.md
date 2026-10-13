@@ -22,7 +22,7 @@ Plataforma de supervisión y control remoto de la maqueta de la terminal portuar
 
 1. [Arquitectura](#1-arquitectura)
 2. [Estructura del repositorio](#2-estructura-del-repositorio)
-3. [Despliegue en el SBC desde cero](#3-despliegue-en-el-sbc-desde-cero)
+3. [Despliegue en el SBC desde cero](#3-despliegue-en-el-sbc-desde-cero) (con Docker: [`docs/docker.md`](docs/docker.md))
 4. [Configuración (`portus.env`)](#4-configuración-portusenv)
 5. [Verificación y acceso desde la red local](#5-verificación-y-acceso-desde-la-red-local)
 6. [Operación diaria](#6-operación-diaria)
@@ -76,6 +76,7 @@ portus/
 ├── mensajeria/     # bot de Telegram                            (python -m mensajeria)
 ├── db/             # migraciones 001–008 y esquema.sql (regenerado, no se edita a mano)
 ├── config/         # mosquitto.conf, acl_portus, portus.env.ejemplo, systemd/
+├── docker/         # broker para Docker (Dockerfile y docker-compose.yml van en la raíz)
 ├── herramientas/   # semillas, simulador del controlador, regenerar_esquema, reproducir_captura
 ├── pruebas/        # pytest (405 pruebas)
 └── docs/           # SPECS, ROADMAP, CODESTYLE, protocolo, tópicos y guías por tema
@@ -86,6 +87,8 @@ portus/
 ---
 
 ## 3. Despliegue en el SBC desde cero
+
+> **¿Con Docker?** Hay una alternativa que levanta los 4 servicios con `docker compose up -d --build`, sin venv, sin usuario `portus` y sin `mosquitto_passwd`: ver [`docs/docker.md`](docs/docker.md). Los pasos 3.3 (configuración), 3.5 (semillas) y 3.6 (bot) aplican igual; cambian los comandos.
 
 Procedimiento de §19.3. Está probado sobre Debian/Ubuntu y Raspberry Pi OS Bookworm (Python 3.11+). Los comandos asumen que se clona en **`/opt/portus`** y que los servicios corren con el usuario de sistema **`portus`**, que es lo que esperan las unidades de `config/systemd/`.
 
@@ -333,6 +336,7 @@ Tras agregar una migración en `db/migraciones/`, regenere `db/esquema.sql` con 
 | Citas, ventana y ciclo de vida | [`docs/citas.md`](docs/citas.md) |
 | Métricas, reportes y línea base de la Fase 3 | [`docs/metricas.md`](docs/metricas.md) |
 | Núcleo web: permisos y decisiones de la Etapa 4 | [`docs/despliegue_web.md`](docs/despliegue_web.md) |
+| Despliegue con Docker en la Raspberry Pi 4B | [`docs/docker.md`](docs/docker.md) |
 
 **Calidad (CODESTYLE):**
 
