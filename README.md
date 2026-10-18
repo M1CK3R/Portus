@@ -82,8 +82,6 @@ portus/
 └── docs/           # SPECS, ROADMAP, CODESTYLE, protocolo, tópicos y guías por tema
 ```
 
-> **Desviación puntual de A-1 [DEC]:** el CODESTYLE llama `firmware/` a la carpeta del controlador. El equipo usa **`src/`** para no romper el proyecto Arduino de la Fase 1. El contrato (`docs/constantes_protocolo.json`) no cambia.
-
 ---
 
 ## 3. Despliegue en el SBC desde cero
@@ -309,7 +307,7 @@ python -m puente --config config/portus.env
   python -m herramientas.crear_operacion_demo --ruta-bd db/portus.db
   ```
   Crea el manifiesto y el levante, sin cita: la cita se pide con `/cita`.
-- **Solo en desarrollo, sin bot:** `--con-cita` escribe la cita directo en la base. **Prohibido en la evaluación** (barrera 🔴 4, [`docs/citas.md`](docs/citas.md) ).
+- **Solo en desarrollo, sin bot:** `--con-cita` escribe la cita directo en la base. (barrera 🔴 4, [`docs/citas.md`](docs/citas.md) ).
 
 Verificación antes de cada commit:
 
