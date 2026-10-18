@@ -1,0 +1,14 @@
+<section id="declaraciones">
+  <h2>Manifiestos sin levante (§14.8)</h2>
+  <div id="dec-lista" class="lista-datos"></div>
+  <h3>Presentar declaración (§9.3)</h3>
+  <form id="dec-form" class="formulario">
+    <label>Manifiesto ID:</label><input name="manifiesto_id" type="number" required>
+    <label>Número:</label><input name="numero" required>
+    <label>Régimen:</label><select name="regimen"><option value="IMPORTACION_DEFINITIVA">Importación definitiva</option><option value="DEPOSITO_TEMPORAL">Depósito temporal</option></select>
+    <label>Descripción (≥10):</label><textarea name="descripcion" minlength="10" required></textarea>
+    <label>Valor:</label><input name="valor" type="number" min="1" required>
+    <button type="submit" class="boton">Presentar</button>
+  </form>
+  <div id="dec-error"></div>
+</section>

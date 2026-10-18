@@ -1,0 +1,16 @@
+<section id="manifiestos">
+  <h2>Manifiestos</h2>
+  <div id="man-lista" class="lista-datos"></div>
+  <h3>Nuevo manifiesto (§9.3)</h3>
+  <form id="man-form" class="formulario">
+    <label>Contenedor:</label><input name="contenedor_id" required>
+    <label>Tipo:</label><select name="tipo_op"><option value="DEPOSITO">Depósito</option><option value="RETIRO">Retiro</option></select>
+    <label>Peso (g):</label><input name="peso_declarado_g" type="number" min="1" required>
+    <label>Tolerancia (%):</label><input name="tolerancia_pct" type="number" value="5" min="1" max="100">
+    <label>Transportista ID:</label><input name="transportista_id" type="number" required>
+    <label>Observaciones:</label><input name="observaciones">
+    <button type="submit" class="boton">Crear</button>
+  </form>
+  <div id="man-detalle" class="detalle"></div>
+  <div id="man-error"></div>
+</section>

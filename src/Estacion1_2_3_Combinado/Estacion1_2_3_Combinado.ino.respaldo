@@ -1,0 +1,2036 @@
+#include <SPI.h>
+#include <MFRC522.h>
+#include <Servo.h>
+#include "HX711.h"
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+
+// ==================================================================
+//  SEMAFOROS DE ESTADO (Garita y Pesaje)
+// ==================================================================
+//
+//  Garita:  Rojo = no se permite el ingreso (default / rechazado)
+//           Verde = ingreso permitido (talanquera abierta)
+//           Azul  = instalaciones ocupadas (no se permite ingreso aunque
+//                    el camion sea valido, porque ya hay un vehiculo
+//                    usando la garita/talanquera)
+//
+//  NOTA: solo se indicaron los pines de rojo (14) y verde (15) para la
+//  garita. Se asume el pin 16 para el azul, siguiendo la secuencia
+//  antes de los pines de pesaje (17,18,19). Confirmar/ajustar si el
+//  pin real es otro.
+#define PIN_GARITA_ROJO   14
+#define PIN_GARITA_VERDE  15
+#define PIN_GARITA_AZUL   16  // TODO: confirmar numero de pin real
+
+enum ColorSemaforo { SEM_ROJO, SEM_VERDE, SEM_AZUL, SEM_APAGADO };
+
+void setSemaforoGarita(ColorSemaforo color) {
+  digitalWrite(PIN_GARITA_ROJO,  color == SEM_ROJO);
+  digitalWrite(PIN_GARITA_VERDE, color == SEM_VERDE);
+  digitalWrite(PIN_GARITA_AZUL,  color == SEM_AZUL);
+}
+
+//  Pesaje:  Rojo = peso invalido / rechazado
+//           Verde = peso valido / aceptado
+//           Azul  = en espera (estabilizando, tarando, o sin lectura aun)
+#define PIN_PESAJE_ROJO   17
+#define PIN_PESAJE_VERDE  18
+#define PIN_PESAJE_AZUL   19
+
+void setSemaforoPesaje(ColorSemaforo color) {
+  digitalWrite(PIN_PESAJE_ROJO,  color == SEM_ROJO);
+  digitalWrite(PIN_PESAJE_VERDE, color == SEM_VERDE);
+  digitalWrite(PIN_PESAJE_AZUL,  color == SEM_AZUL);
+}
+
+// ==================================================================
+//  PANTALLA LCD 16x2 (espejo del monitor serie)
+// ==================================================================
+//
+// Solo repite en la pantalla lo mismo que ya se imprime por Serial,
+// para poder ver el estado del sistema sin la laptop conectada -- no
+// reemplaza al monitor serie, es un espejo.
+//
+// El codigo arma varias lineas encadenando varios consola.print()
+// seguidos antes de un consola.println() final (ej. "Camion #" + idx +
+// " detectado..."). Por eso no alcanza con mandar cada print() suelto
+// a la pantalla por separado -- se verian pedazos de linea encimados.
+// En vez de eso, ConsolaDoble hereda de Print (la misma clase base que
+// usa Serial) y va acumulando caracteres hasta encontrar un '\n': ahi
+// SI manda la linea completa a la pantalla (y a Serial). Por eso en
+// todo el archivo se reemplazo "consola.print(" / "consola.println(" por
+// "consola.print(" / "consola.println(" -- el resto del codigo no
+// cambio su forma de imprimir. Los comandos leidos por Serial
+// (available/read/peek) siguen usando Serial directamente sin cambios,
+// porque eso es ENTRADA, no salida.
+//
+// Requiere la libreria "LiquidCrystal I2C" (por ejemplo la de Frank de
+// Brabander, instalable desde el Administrador de Librerias del IDE).
+// Direccion I2C tipica de estos modulos PCF8574: 0x27; si la pantalla
+// no muestra nada, probar 0x3F.
+//
+// OJO DE HARDWARE: el bus I2C del Mega usa los pines FIJOS 20 (SDA) y
+// 21 (SCL) -- no se pueden cambiar por software. El pin 21 ya estaba
+// usado por el boton de paro de emergencia (Fase 6), asi que se movio
+// ese boton al pin 18 (tambien soporta interrupcion por hardware en el
+// Mega) -- falta mover el cable fisico del boton de 21 a 18.
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+String lcdLineaSuperior = "";
+String lcdLineaInferior = "";
+
+void mostrarEnLCD(const String &linea) {
+  lcdLineaSuperior = lcdLineaInferior;
+  lcdLineaInferior = linea.substring(0, 16); // recortada a lo que entra en un renglon
+
+  lcd.setCursor(0, 0);
+  lcd.print(F("                ")); // limpia el renglon (16 espacios)
+  lcd.setCursor(0, 0);
+  lcd.print(lcdLineaSuperior);
+
+  lcd.setCursor(0, 1);
+  lcd.print(F("                "));
+  lcd.setCursor(0, 1);
+  lcd.print(lcdLineaInferior);
+}
+
+class ConsolaDoble : public Print {
+  public:
+    String bufferLinea = "";
+
+    virtual size_t write(uint8_t c) override {
+      Serial.write(c);
+
+      if (c == '\n') {
+        mostrarEnLCD(bufferLinea);
+        bufferLinea = "";
+      } else if (c != '\r') {
+        bufferLinea += (char) c;
+      }
+      return 1;
+    }
+};
+
+ConsolaDoble consola;
+
+
+// ==================================================================
+//  FASE 1: MODELO DE DATOS (camion, contenedor, manifiesto, turno)
+// ==================================================================
+//
+//  Todo precargado en memoria, tal como pide el enunciado de PORTUS
+//  para esta fase (nada de creacion/consulta dinamica desde afuera).
+//  Se usan arreglos fijos (nada de String en los structs) para no
+//  fragmentar la memoria del Mega con el tiempo.
+//
+//  Convencion usada aqui: el campo "id" de cada registro coincide con
+//  su indice dentro del arreglo (manifiestos[3].id == 3). Si en el
+//  futuro agregan/quitan registros a mano, mantener esa igualdad o
+//  cambiar los lookups por id en vez de por indice directo.
+
+enum TipoOperacion : byte { OP_DEPOSITO, OP_RETIRO };
+enum EstadoManifiesto : byte { MANIFIESTO_PENDIENTE, MANIFIESTO_EN_PROCESO, MANIFIESTO_CERRADO };
+enum EstadoContenedor : byte { CONTENEDOR_EN_CAMION, CONTENEDOR_EN_PATIO, CONTENEDOR_ENTREGADO };
+
+// Estacion/estado en la que se encuentra un turno. Reemplaza al viejo
+// EstadoPesajeTurno de Fase 2 -- ahora la maquina de estados cubre todo
+// el recorrido del camion, no solo el pesaje, porque con concurrencia
+// (Fase 5) varios turnos avanzan en paralelo y cada uno necesita saber
+// en cual "estacion logica" esta parado.
+enum EstacionTurno : byte {
+  EST_ESPERANDO_PESAJE_INICIAL,
+  EST_EN_PESAJE_INICIAL,
+  EST_ESPERANDO_TRANSFERENCIA,   // en cola de la grua o esperando su turno
+  EST_EN_TRANSFERENCIA,           // la grua esta trabajando en este turno ahora mismo
+  EST_ESPERANDO_PESAJE_FINAL,
+  EST_EN_PESAJE_FINAL,
+  EST_ESPERANDO_SALIDA,           // pesaje final OK, listo para que la salida (Fase 7) lo cierre
+  EST_RETENIDO                    // peso fuera de tolerancia; requiere desvio manual, no se cierra
+};
+
+struct Camion {
+  byte id;
+  char uidRFID[15];   // UID en hex, tal como ya lo lee actualizarGarita()
+  float tara;          // peso del camion vacio (g)
+  bool autorizado;
+};
+
+struct Contenedor {
+  byte id;
+  float pesoDeclarado;    // g
+  byte ubicacion;          // 0 = en camion, 1..N = posicion de patio, 255 = sin ubicar
+  EstadoContenedor estado;
+};
+
+struct Manifiesto {
+  byte id;
+  byte idCamion;
+  byte idContenedor;
+  TipoOperacion tipo;
+  float pesoDeclarado;   // g, lo que deberia pesar el contenedor
+  float tolerancia;       // g, margen aceptado sobre pesoDeclarado
+  EstadoManifiesto estado;
+};
+
+// Un turno por camion. idManifiesto == SIN_TURNO significa "slot libre"
+// (ese camion no tiene ninguna operacion en curso ahora mismo). El
+// indice dentro de turnos[] coincide con el id/indice del camion (ver
+// convencion de camiones[] mas abajo), asi que turnos[i] siempre es el
+// turno del camion i, si tiene alguno abierto.
+struct Turno {
+  byte idManifiesto;   // SIN_TURNO si el slot esta libre
+  EstacionTurno estacion;
+  float pesajeInicial;
+  float pesajeFinal;
+  byte posicionPatio;   // SIN_POSICION si aun no se ha determinado
+};
+
+const byte SIN_TURNO = 255;
+
+#define NUM_CAMIONES 3
+#define NUM_CONTENEDORES 6
+#define NUM_MANIFIESTOS 6
+
+// NOTA DE CALIBRACION: tara medida (camion solo ~13g). Se uso el mismo
+// valor para los 3 porque todavia no se ha pesado cada camion
+// individualmente -- ajustar cuando midan los otros dos.
+Camion camiones[NUM_CAMIONES] = {
+  { 0, "0437ec98c92a81", 13.0, true },
+  { 1, "043cec98c92a81", 13.0, true },
+  { 2, "043dec98c92a81", 13.0, true },
+};
+
+// NOTA DE CALIBRACION: pesoDeclarado medido (con carga ~20g, tara del
+// camion ~13g -> contenedor solo, aprox 7g). Se uso el mismo valor
+// para los 6 porque todavia no se ha pesado cada contenedor impreso
+// individualmente -- ajustar cuando los tengan fabricados.
+//
+// Contenedores 3 y 4 arrancan ya colocados en el patio (posiciones 1 y 2)
+// para poder probar de una vez el flujo de retiro sin tener que hacer
+// primero un deposito.
+Contenedor contenedores[NUM_CONTENEDORES] = {
+  { 0, 7.0, 0,   CONTENEDOR_EN_CAMION },
+  { 1, 7.0, 0,   CONTENEDOR_EN_CAMION },
+  { 2, 7.0, 0,   CONTENEDOR_EN_CAMION },
+  { 3, 7.0, 1,   CONTENEDOR_EN_PATIO  },
+  { 4, 7.0, 2,   CONTENEDOR_EN_PATIO  },
+  { 5, 7.0, 255, CONTENEDOR_ENTREGADO },
+};
+
+// Tabla de 6 operaciones precargadas (3 depositos, 3 retiros), combinando
+// los 3 camiones, como pide el enunciado (entre 6 y 8 operaciones).
+//
+// IMPORTANTE: el enunciado exige que un camion tenga EXACTAMENTE UN
+// manifiesto pendiente para poder ingresar. Por eso aqui solo arranca
+// PENDIENTE un manifiesto por camion (la "primera ronda": 0, 1, 2). Los
+// otros tres (3, 4, 5) arrancan CERRADO -- son la "segunda ronda" de
+// cada camion. Para probarlos, cambien a mano su estado a
+// MANIFIESTO_PENDIENTE (o, cuando este el flujo de salida, el cierre
+// del primer turno de ese camion deberia dejar disponible el siguiente).
+//
+// pesoDeclarado tambien recalibrado a ~7.5g (mismo criterio que arriba).
+Manifiesto manifiestos[NUM_MANIFIESTOS] = {
+  { 0, 0, 0, OP_DEPOSITO, 7.0, 3.0, MANIFIESTO_PENDIENTE },
+  { 1, 1, 1, OP_DEPOSITO, 7.0, 3.0, MANIFIESTO_PENDIENTE },
+  { 2, 2, 3, OP_RETIRO,   7.0, 3.0, MANIFIESTO_PENDIENTE },
+  { 3, 0, 2, OP_DEPOSITO, 7.0, 3.0, MANIFIESTO_CERRADO   }, // 2da ronda camion 0
+  { 4, 1, 4, OP_RETIRO,   7.0, 3.0, MANIFIESTO_CERRADO   }, // 2da ronda camion 1
+  { 5, 2, 5, OP_DEPOSITO, 7.0, 3.0, MANIFIESTO_CERRADO   }, // 2da ronda camion 2
+};
+
+// Fase 5: un turno por camion (hasta 3 simultaneos). turnos[i] es el
+// turno del camion i.
+Turno turnos[NUM_CAMIONES];
+
+// Recurso compartido: la bascula fisica solo puede pesar un camion a la
+// vez. SIN_TURNO = bascula libre; si no, guarda el indice del camion
+// que esta siendo pesado ahora mismo. Asignado por asignarPesajeSiLibre().
+byte turnoEnPesaje = SIN_TURNO;
+
+// Cola de trabajos de la grua (Fase 5): FIFO de indices de camion,
+// llenada cuando un turno pasa su pesaje inicial y queda
+// EST_ESPERANDO_TRANSFERENCIA. La grua atiende siempre al primero
+// (orden de llegada = orden deterministico, tal como pide el enunciado).
+byte colaGrua[NUM_CAMIONES];
+byte colaGruaInicio = 0;
+byte colaGruaFin = 0;
+byte colaGruaCantidad = 0;
+
+void encolarTrabajoGrua(byte idxCamion) {
+  if (colaGruaCantidad >= NUM_CAMIONES) return; // no deberia pasar (max 1 turno x camion)
+  colaGrua[colaGruaFin] = idxCamion;
+  colaGruaFin = (colaGruaFin + 1) % NUM_CAMIONES;
+  colaGruaCantidad++;
+}
+
+int primeroEnColaGrua() {
+  if (colaGruaCantidad == 0) return -1;
+  return colaGrua[colaGruaInicio];
+}
+
+void desencolarGrua() {
+  if (colaGruaCantidad == 0) return;
+  colaGruaInicio = (colaGruaInicio + 1) % NUM_CAMIONES;
+  colaGruaCantidad--;
+}
+
+// Estado del ciclo automatico de la grua (Fase 4/5). Declarado aqui
+// (antes de la garita y el pesaje) porque el comando de prueba 'x'
+// tambien necesita poder reiniciarlo. La logica de cada paso esta en
+// actualizarCicloAutomaticoGrua(), en la seccion de la grua.
+enum EstadoCicloAutomatico : byte {
+  CICLO_INACTIVO,
+  CICLO_INICIAR_MOVER_ORIGEN,
+  CICLO_ESPERANDO_MOVER_ORIGEN,
+  CICLO_INICIAR_BAJAR_RECOGER,
+  CICLO_ESPERANDO_BAJAR_RECOGER,
+  CICLO_INICIAR_MOVER_DESTINO,
+  CICLO_ESPERANDO_MOVER_DESTINO,
+  CICLO_INICIAR_BAJAR_DEJAR,
+  CICLO_ESPERANDO_BAJAR_DEJAR,
+  CICLO_INICIAR_MOVER_HOME,
+  CICLO_ESPERANDO_MOVER_HOME,
+  CICLO_FINALIZAR
+};
+EstadoCicloAutomatico cicloAutomatico = CICLO_INACTIVO;
+byte cicloIdxCamion = SIN_TURNO; // que turno esta siendo atendido ahora mismo por el ciclo
+
+// ---- Patio lineal apilable ----
+enum EstadoPosicion : byte { POS_LIBRE, POS_RESERVADA, POS_OCUPADA, POS_BLOQUEADA };
+
+struct Posicion {
+  byte id;
+  EstadoPosicion estado;
+  byte nivelActual;         // 0 = vacia, 1 = un contenedor, 2 = dos contenedores
+  byte idContenedorNivel0;  // SIN_CONTENEDOR si no hay
+  byte idContenedorNivel1;  // SIN_CONTENEDOR si no hay
+};
+
+const byte SIN_CONTENEDOR = 255;
+const byte SIN_POSICION = 255;
+#define NUM_POSICIONES 3
+
+// Coincide con contenedores[3].ubicacion == 1 y contenedores[4].ubicacion == 2
+// definidos mas arriba: ambos ya estan "fisicamente" en el patio.
+Posicion patio[NUM_POSICIONES] = {
+  { 0, POS_LIBRE,   0, SIN_CONTENEDOR, SIN_CONTENEDOR },
+  { 1, POS_OCUPADA, 1, 3,              SIN_CONTENEDOR },
+  { 2, POS_OCUPADA, 1, 4,              SIN_CONTENEDOR },
+};
+
+// Politica de asignacion para depositos: determinista, primera posicion
+// libre o con espacio para un segundo nivel, en orden. Se salta las
+// bloqueadas. Devuelve -1 si no hay ninguna accesible.
+int buscarPosicionLibreAccesible() {
+  for (int i = 0; i < NUM_POSICIONES; i++) {
+    if (patio[i].estado == POS_BLOQUEADA) continue;
+    if (patio[i].nivelActual < 2) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+// Para retiros: localiza en que posicion del patio esta un contenedor
+// dado. Devuelve -1 si no aparece en ninguna posicion (inconsistencia
+// o contenedor que nunca estuvo en el patio).
+int buscarPosicionDeContenedor(byte idContenedor) {
+  for (int i = 0; i < NUM_POSICIONES; i++) {
+    if (patio[i].idContenedorNivel0 == idContenedor || patio[i].idContenedorNivel1 == idContenedor) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+// Busca un camion registrado por su UID de RFID. Devuelve el indice
+// dentro de camiones[], o -1 si no existe (RFID no reconocido).
+int buscarCamionPorUID(String uid) {
+  for (int i = 0; i < NUM_CAMIONES; i++) {
+    if (uid.equals(String(camiones[i].uidRFID))) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+// Busca el manifiesto pendiente de un camion. El enunciado exige que
+// exista EXACTAMENTE uno; si hay cero o mas de uno, se considera
+// invalido y se devuelve -1 (el llamador decide el mensaje de rechazo).
+int buscarManifiestoPendiente(byte idCamion) {
+  int encontrado = -1;
+  byte cantidad = 0;
+  for (int i = 0; i < NUM_MANIFIESTOS; i++) {
+    if (manifiestos[i].idCamion == idCamion && manifiestos[i].estado == MANIFIESTO_PENDIENTE) {
+      cantidad++;
+      encontrado = i;
+    }
+  }
+  return (cantidad == 1) ? encontrado : -1;
+}
+
+
+// ==================================================================
+//  ESTACION 1: GARITA (RFID + Talanquera + Proximidad)
+// ==================================================================
+
+//  RC522 
+#define SS_PIN 53
+#define RST_PIN 49
+MFRC522 mfrc522(SS_PIN, RST_PIN);
+
+//  Servo (talanquera) 
+Servo servoGarita;
+#define SERVO_PIN 8
+#define ESTADO_ABIERTO 0
+#define ESTADO_CERRADO 80
+
+//  HC-SR04 
+#define TRIG_PIN 11
+#define ECHO_PIN 12
+unsigned long ultimaLecturaHC = 0;
+const unsigned long INTERVALO_HC = 200;
+
+//  Estado del sistema
+bool talanqueraAbierta = false;
+bool camionDetectadoEnfrente = false;
+unsigned long tiempoApertura = 0;
+const unsigned long TIEMPO_MAXIMO_ABIERTO = 4000;
+
+const float UMBRAL_CERCA = 5.0;
+const float UMBRAL_LEJOS = 7.0;
+const int LECTURAS_NECESARIAS = 3;
+int contador = 0;
+
+float leerDistancia() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+
+  long duracion = pulseIn(ECHO_PIN, HIGH, 30000);
+  if (duracion == 0) return -1;
+  return duracion * 0.034 / 2;
+}
+
+void actualizarGarita() {
+  if (!talanqueraAbierta && mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()) {
+    String uid = "";
+    for (byte i = 0; i < mfrc522.uid.size; i++) {
+      if (mfrc522.uid.uidByte[i] < 0x10) uid += "0";
+      uid += String(mfrc522.uid.uidByte[i], HEX);
+    }
+    uid.toLowerCase();
+
+    consola.print("UID leido: ");
+    consola.println(uid);
+
+    int idxCamion = buscarCamionPorUID(uid);
+
+    if (idxCamion == -1) {
+      consola.println("-> ERROR: RFID no reconocido.");
+      setSemaforoGarita(SEM_ROJO);
+    }
+    else if (!camiones[idxCamion].autorizado) {
+      consola.println("-> ERROR: camion no autorizado.");
+      setSemaforoGarita(SEM_ROJO);
+    }
+    else if (turnos[idxCamion].idManifiesto != SIN_TURNO) {
+      // Fase 5: con varios turnos simultaneos, esto ya no es "todo el
+      // sistema ocupado" (eso lo cubre la rama de abajo, el porton
+      // fisico) sino "este camion en particular ya tiene una operacion
+      // en curso en otra estacion".
+      consola.println("-> ERROR: este camion ya tiene una operacion en curso.");
+      setSemaforoGarita(SEM_ROJO);
+    }
+    else {
+      int idxManifiesto = buscarManifiestoPendiente(camiones[idxCamion].id);
+
+      if (idxManifiesto == -1) {
+        consola.println("-> ERROR: no existe exactamente un manifiesto pendiente para este camion.");
+        setSemaforoGarita(SEM_ROJO);
+      }
+      else {
+        Manifiesto &m = manifiestos[idxManifiesto];
+        int idxPosicion = -1;
+
+        if (m.tipo == OP_DEPOSITO) {
+          idxPosicion = buscarPosicionLibreAccesible();
+          if (idxPosicion == -1) {
+            consola.println("-> ERROR: no existe una posicion accesible en el patio.");
+            setSemaforoGarita(SEM_ROJO);
+          }
+        }
+        else { // OP_RETIRO
+          idxPosicion = buscarPosicionDeContenedor(m.idContenedor);
+          if (idxPosicion == -1 || contenedores[m.idContenedor].estado != CONTENEDOR_EN_PATIO) {
+            consola.println("-> ERROR: el contenedor solicitado no tiene una ubicacion valida en el patio.");
+            setSemaforoGarita(SEM_ROJO);
+            idxPosicion = -1; // por si aparecia en el patio pero el inventario no coincide
+          }
+        }
+
+        if (idxPosicion != -1) {
+          // Abrir turno: a partir de aqui el pesaje ya sabe contra que
+          // manifiesto comparar la lectura de las celdas.
+          turnos[idxCamion].idManifiesto = manifiestos[idxManifiesto].id;
+          turnos[idxCamion].estacion = EST_ESPERANDO_PESAJE_INICIAL;
+          turnos[idxCamion].pesajeInicial = 0;
+          turnos[idxCamion].pesajeFinal = 0;
+          turnos[idxCamion].posicionPatio = idxPosicion;
+          manifiestos[idxManifiesto].estado = MANIFIESTO_EN_PROCESO;
+
+          // La reserva NO es ocupacion confirmada -- solo aplica al
+          // depositar; el retiro no cambia el estado de la posicion
+          // hasta que la grua efectivamente la vacie (Fase 4/5).
+          if (m.tipo == OP_DEPOSITO) {
+            patio[idxPosicion].estado = POS_RESERVADA;
+          }
+
+          consola.print("-> Camion valido. Manifiesto #");
+          consola.print(manifiestos[idxManifiesto].id);
+          consola.print(" abierto (posicion de patio #");
+          consola.print(idxPosicion);
+          consola.println("). Abriendo talanquera.");
+
+          servoGarita.write(ESTADO_ABIERTO);
+          talanqueraAbierta = true;
+          camionDetectadoEnfrente = false;
+          tiempoApertura = millis();
+          contador = 0;
+          setSemaforoGarita(SEM_VERDE);
+        }
+      }
+    }
+
+    mfrc522.PICC_HaltA();
+    mfrc522.PCD_StopCrypto1();
+  }
+
+  // Si la talanquera ya esta abierta/en uso y se detecta otro camion
+  // intentando ingresar, se le indica con azul que las instalaciones
+  // estan ocupadas (no se procesa su tarjeta todavia).
+  else if (talanqueraAbierta && mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()) {
+    consola.println("-> Instalaciones ocupadas. No se permite el ingreso todavia.");
+    setSemaforoGarita(SEM_AZUL);
+    mfrc522.PICC_HaltA();
+    mfrc522.PCD_StopCrypto1();
+  }
+
+  if (talanqueraAbierta) {
+    if (millis() - tiempoApertura >= TIEMPO_MAXIMO_ABIERTO) {
+      servoGarita.write(ESTADO_CERRADO);
+      talanqueraAbierta = false;
+      camionDetectadoEnfrente = false;
+      contador = 0;
+      setSemaforoGarita(SEM_ROJO);
+      consola.println("-> Tiempo maximo alcanzado. Cerrando talanquera.");
+    }
+    else if (millis() - ultimaLecturaHC >= INTERVALO_HC) {
+      ultimaLecturaHC = millis();
+
+      float distancia = leerDistancia();
+      if (distancia > 0) {
+        consola.print("Distancia: ");
+        consola.print(distancia);
+        consola.println(" cm");
+
+        if (!camionDetectadoEnfrente) {
+          if (distancia <= UMBRAL_CERCA) {
+            contador++;
+            consola.print("-> Camion enfrente, confirmacion ");
+            consola.print(contador);
+            consola.print("/");
+            consola.println(LECTURAS_NECESARIAS);
+            if (contador >= LECTURAS_NECESARIAS) {
+              camionDetectadoEnfrente = true;
+              contador = 0;
+              consola.println("-> Camion confirmado enfrente. Esperando que se aleje...");
+            }
+          } else {
+            contador = 0;
+          }
+        } else {
+          if (distancia >= UMBRAL_LEJOS) {
+            contador++;
+            consola.print("-> Camion alejado, confirmacion ");
+            consola.print(contador);
+            consola.print("/");
+            consola.println(LECTURAS_NECESARIAS);
+            if (contador >= LECTURAS_NECESARIAS) {
+              consola.println("-> Confirmado. Cerrando talanquera.");
+              servoGarita.write(ESTADO_CERRADO);
+              talanqueraAbierta = false;
+              camionDetectadoEnfrente = false;
+              contador = 0;
+              setSemaforoGarita(SEM_ROJO);
+            }
+          } else {
+            contador = 0;
+          }
+        }
+      }
+    }
+  }
+}
+
+// ==================================================================
+//  ESTACION 2: PESAJE (Sensor A + Sensor B dinamico, Sensor C estatico)
+// ==================================================================
+//
+//  Sensor A y Sensor B COMPARTEN el pin de reloj (pin 2), tal como
+//  ya esta el hardware -> se leen con una funcion manual que pulsa
+//  el reloj UNA sola vez y lee ambos DOUT en el mismo pulso (misma
+//  foto de instante para A y B).
+//  Sensor C tiene sus propios pines (5 y 6) -> usa la libreria
+//  nativa HX711.h normalmente, sin conflicto.
+//
+//  Requiere la libreria "HX711" (bogde) SOLO para el Sensor C.
+//  A y B no la usan.
+
+// ---------- Pines ----------
+// Base 1 - Pesaje dinamico (A y B comparten reloj, como ya esta cableado)
+#define PIN_SCK_AB   2
+#define PIN_DT_A     3
+#define PIN_DT_B     4
+
+// Base 2 - Pesaje estatico (pines propios, sin conflicto)
+#define PIN_SCK_C    5
+#define PIN_DT_C     6
+
+HX711 sensorC;
+
+// ---------- Calibracion (AJUSTAR con la protoboard de 70g) ----------
+float FACTOR_A = 812.0;   // validado con el metodo de suma constante
+float FACTOR_B = 812.0;   // validado con el metodo de suma constante
+float FACTOR_C = 2280.0;  // pendiente de calibrar
+
+long offsetA = 0;
+long offsetB = 0;
+
+// Piso de seguridad: descarta lecturas sin sentido fisico (ruido,
+// celda desconectada, camion que no piso bien la plataforma) ANTES
+// de comparar contra el manifiesto. No es el criterio de aceptacion
+// del peso -- eso ahora lo decide el manifiesto del turno activo --
+// solo evita que una lectura basura se evalue como valida o invalida
+// por casualidad.
+//
+// Ajustado con datos reales de la maqueta: el camion solo (tarado)
+// midio ~11-13g, y con carga ~18-21g. El ruido de plataforma vacia
+// puede picar transitoriamente hasta ~8-14g justo despues de tarar,
+// asi que se sube el piso por encima de eso para no confundirlo con
+// el camion real. Si en su maqueta el ruido en vacio es distinto,
+// ajustar este valor.
+const float PESO_MINIMO_FISICO = 8.0; // g
+
+// Rango generico viejo: ya NO se usa para decidir el semaforo (eso lo
+// hace ahora el manifiesto del turno activo, mas abajo). Se deja
+// comentado por si se necesita como fallback de prueba sin manifiesto.
+// const float PESO_MINIMO_VALIDO = 10.0;
+// const float PESO_MAXIMO_VALIDO = 40.0;
+
+// ---------- Confirmacion visual: sostener VERDE o ROJO ~5s antes de avanzar ----------
+// Cuando el peso ya se evaluo (aprobado o rechazado), no se avanza de
+// inmediato: se deja el semaforo fijo (VERDE si aprobo, ROJO si no) por
+// TIEMPO_CONFIRMACION_VERDE ms para que el aviso se note claramente, y
+// RECIEN despues se completa lo que falte (encolar en la grua si
+// corresponde, liberar la bascula). Mientras se confirma, no se re-evalua
+// el peso.
+const unsigned long TIEMPO_CONFIRMACION_VERDE = 5000; // ms, aplica igual a rojo y a verde
+
+bool pesajeConfirmando = false;
+unsigned long tInicioConfirmacionPesaje = 0;
+byte confirmacionIdxCamion = SIN_TURNO;
+bool confirmacionEsFinal = false;  // false = pesaje inicial, true = pesaje final
+bool confirmacionExito = false;    // true = peso aprobado (verde), false = rechazado (rojo)
+ColorSemaforo confirmacionColor = SEM_APAGADO; // color a sostener durante la espera
+
+// Arranca la espera de confirmacion en vez de completar la transicion de
+// una vez. Los datos quedan guardados para cuando se cumpla el tiempo
+// (ver actualizarConfirmacionPesaje()).
+void iniciarConfirmacionPesaje(byte idxCamion, bool esFinal, bool exito) {
+  pesajeConfirmando = true;
+  tInicioConfirmacionPesaje = millis();
+  confirmacionIdxCamion = idxCamion;
+  confirmacionEsFinal = esFinal;
+  confirmacionExito = exito;
+  confirmacionColor = exito ? SEM_VERDE : SEM_ROJO;
+}
+
+// Se llama en cada vuelta de loop(). Cuando ya paso el tiempo de
+// confirmacion, completa lo que en la version anterior se hacia de
+// inmediato al evaluar el peso: si aprobo y era pesaje inicial, encola el
+// trabajo de la grua; en cualquier otro caso (aprobado final, o
+// rechazado inicial/final) solo libera la bascula -- el estado del turno
+// (EST_ESPERANDO_TRANSFERENCIA / EST_ESPERANDO_SALIDA / EST_RETENIDO) ya
+// se dejo puesto en el momento de evaluar, mas arriba.
+void actualizarConfirmacionPesaje() {
+  if (!pesajeConfirmando) return;
+  if (millis() - tInicioConfirmacionPesaje < TIEMPO_CONFIRMACION_VERDE) return;
+
+  byte idx = confirmacionIdxCamion;
+  bool exito = confirmacionExito;
+  bool esFinal = confirmacionEsFinal;
+  pesajeConfirmando = false;
+  confirmacionIdxCamion = SIN_TURNO;
+
+  if (exito && !esFinal) {
+    encolarTrabajoGrua(idx);
+    consola.println(F("Confirmacion de pesaje inicial completa. Autorizado hacia transferencia."));
+  } else if (exito && esFinal) {
+    consola.println(F("Confirmacion de pesaje final completa."));
+  } else {
+    consola.println(F("Confirmacion de peso rechazado completa. Turno retenido."));
+  }
+  turnoEnPesaje = SIN_TURNO; // libera la bascula para el siguiente, recien ahora
+}
+
+// ---------- Lectura manual sincronizada de A y B ----------
+// Pulsa el reloj compartido UNA vez y lee ambos DOUT en cada pulso,
+// asi ambas conversiones corresponden exactamente al mismo instante.
+bool leerParSincronizado(long &valorA, long &valorB) {
+  if (digitalRead(PIN_DT_A) == HIGH || digitalRead(PIN_DT_B) == HIGH) {
+    return false; // alguno de los dos todavia no tiene dato nuevo
+  }
+
+  valorA = 0;
+  valorB = 0;
+  for (uint8_t i = 0; i < 24; i++) {
+    digitalWrite(PIN_SCK_AB, HIGH);
+    delayMicroseconds(1);
+    valorA = (valorA << 1) | digitalRead(PIN_DT_A);
+    valorB = (valorB << 1) | digitalRead(PIN_DT_B);
+    digitalWrite(PIN_SCK_AB, LOW);
+    delayMicroseconds(1);
+  }
+  // 25er pulso: fija ganancia 128 / canal A para el siguiente ciclo
+  digitalWrite(PIN_SCK_AB, HIGH);
+  delayMicroseconds(1);
+  digitalWrite(PIN_SCK_AB, LOW);
+
+  if (valorA & 0x800000) valorA |= 0xFF000000;
+  if (valorB & 0x800000) valorB |= 0xFF000000;
+  return true;
+}
+
+// ---------- Maquina de estados no bloqueante (estabilizacion + tara) ----------
+// Nada de delay() ni de while() de espera: cada estado se revisa una vez
+// por vuelta de loop() y avanza solo cuando su condicion de tiempo o de
+// muestreo se cumple, comparando contra millis(). Mientras tanto, Garita
+// y Grua siguen atendiendose con normalidad.
+enum EstadoPesaje {
+  PESAJE_ESTABILIZANDO,     // esperando 15s a que HX711 y celdas se asienten
+  PESAJE_TARA_ESPERA,       // pausa corta antes de empezar a muestrear la tara
+  PESAJE_TARA_MUESTREANDO,  // acumulando N_TARA muestras de A y B
+  PESAJE_LISTO              // operando: reporta A, B y C en cada lectura nueva
+};
+
+EstadoPesaje estadoPesaje = PESAJE_ESTABILIZANDO;
+unsigned long tReferenciaPesaje = 0;
+
+const unsigned long TIEMPO_ESTABILIZACION = 15000; // ms, igual que el delay original
+const unsigned long TIEMPO_ESPERA_TARA    = 500;    // ms, igual que el delay original
+
+const uint8_t N_TARA = 30;
+uint8_t muestrasTaraObtenidas = 0;
+long sumaTaraA = 0;
+long sumaTaraB = 0;
+
+// Inicializacion del modulo de pesaje: se llama una vez desde setup().
+// Solo configura pines y arranca el cronometro de estabilizacion; el
+// resto del proceso (tara, sensor C) ocurre despues, dentro de
+// actualizarPesaje(), sin bloquear el arranque del resto del sistema.
+void iniciarPesaje() {
+  pinMode(PIN_SCK_AB, OUTPUT);
+  pinMode(PIN_DT_A, INPUT);
+  pinMode(PIN_DT_B, INPUT);
+  digitalWrite(PIN_SCK_AB, LOW);
+
+  sensorC.begin(PIN_DT_C, PIN_SCK_C);
+  sensorC.set_scale(FACTOR_C);
+  consola.print(F("Sensor C listo? "));
+  consola.println(sensorC.is_ready() ? F("SI") : F("NO - revisar cableado C"));
+
+  consola.println(F("=== Estacion de pesaje: A+B manual, C con libreria ==="));
+  consola.println(F("Estabilizando HX711 y celdas (15s, sin bloquear el resto del sistema)..."));
+
+  setSemaforoPesaje(SEM_AZUL); // en espera mientras estabiliza y tara
+
+  tReferenciaPesaje = millis();
+  estadoPesaje = PESAJE_ESTABILIZANDO;
+}
+
+// Reporta A, B (promedio movil) y C, y actualiza el semaforo de
+// pesaje comparando contra el manifiesto del turno activo (Fase 1).
+// Se llama solo cuando el pesaje ya esta tarado y operativo.
+void leerYReportarPesaje() {
+  long crudoA, crudoB;
+  if (leerParSincronizado(crudoA, crudoB)) {
+
+    // Promedio movil simple de las ultimas N lecturas, para amortiguar
+    // el ruido cuando se pesan objetos livianos (unos pocos gramos).
+    static const uint8_t N = 8;
+    static float histA[N] = {0};
+    static float histB[N] = {0};
+    static uint8_t idx = 0;
+    static uint8_t llenado = 0;
+
+    float pesoA = (crudoA - offsetA) / FACTOR_A;
+    float pesoB = (crudoB - offsetB) / FACTOR_B;
+
+    histA[idx] = pesoA;
+    histB[idx] = pesoB;
+    idx = (idx + 1) % N;
+    if (llenado < N) llenado++;
+
+    float promA = 0, promB = 0;
+    for (uint8_t i = 0; i < llenado; i++) {
+      promA += histA[i];
+      promB += histB[i];
+    }
+    promA /= llenado;
+    promB /= llenado;
+
+    // La impresion se limita a cada PRINT_INTERVAL ms para que el
+    // Monitor Serie no se inunde de lineas -- la EVALUACION del
+    // semaforo (mas abajo) sigue corriendo en cada lectura, sin
+    // throttle, solo se throttlea lo que se imprime. Ademas, mientras
+    // la grua esta con su ciclo automatico en curso, se deja de
+    // imprimir del todo (no hay nada nuevo que reportar: la bascula ya
+    // esta libre y lo que se lea ahi es solo ruido de plataforma vacia).
+    const unsigned long PRINT_INTERVAL = 400;
+    static unsigned long ultimoPrint = 0;
+    bool tocaImprimir = (millis() - ultimoPrint >= PRINT_INTERVAL) && (cicloAutomatico == CICLO_INACTIVO);
+
+    if (tocaImprimir) {
+      ultimoPrint = millis();
+
+      consola.print(F("A="));
+      consola.print(promA, 1);
+      consola.print(F(" g   B="));
+      consola.print(promB, 1);
+      consola.print(F(" g   A+B="));
+      consola.print(promA + promB, 1);
+      consola.print(F(" g"));
+
+      consola.print(F("   C="));
+      if (sensorC.is_ready()) {
+        consola.print(sensorC.get_units(1), 1);
+        consola.println(F(" g"));
+      } else {
+        consola.println(F("NO_LISTO"));
+      }
+    }
+
+    // ---- Semaforo de pesaje contra el manifiesto del turno en la bascula ----
+    float pesoTotal = promA + promB;
+
+    if (pesajeConfirmando) {
+      // Ya se evaluo el peso (aprobado o rechazado) y se esta sosteniendo
+      // el color correspondiente por TIEMPO_CONFIRMACION_VERDE ms (ver
+      // actualizarConfirmacionPesaje()). No se vuelve a evaluar nada
+      // mientras tanto.
+      setSemaforoPesaje(confirmacionColor);
+    }
+    else if (pesoTotal < PESO_MINIMO_FISICO) {
+      // lectura no confiable (ruido/plataforma vacia): ni siquiera se
+      // evalua contra el manifiesto todavia.
+      setSemaforoPesaje(SEM_AZUL);
+    }
+    else if (turnoEnPesaje == SIN_TURNO) {
+      // ningun turno tiene la bascula asignada ahora mismo (ver
+      // asignarPesajeSiLibre(), llamada cada vuelta de loop)
+      setSemaforoPesaje(SEM_AZUL);
+    }
+    else {
+      Turno &t = turnos[turnoEnPesaje];
+      Manifiesto &m = manifiestos[t.idManifiesto]; // id == indice, ver nota arriba
+      Camion &cam = camiones[turnoEnPesaje]; // id de camion == indice, misma convencion
+
+      if (t.estacion == EST_EN_PESAJE_INICIAL) {
+
+        if (m.tipo == OP_DEPOSITO) {
+          // El camion trae el contenedor: bruto - tara = peso del
+          // contenedor, se compara contra lo declarado en el manifiesto.
+          float pesoContenedor = pesoTotal - cam.tara;
+
+          if (abs(pesoContenedor - m.pesoDeclarado) <= m.tolerancia) {
+            setSemaforoPesaje(SEM_VERDE);
+            t.pesajeInicial = pesoTotal;
+            t.estacion = EST_ESPERANDO_TRANSFERENCIA;
+            consola.println(F("Pesaje inicial (deposito) OK. Confirmando (5s)..."));
+            iniciarConfirmacionPesaje(turnoEnPesaje, false, true);
+          } else {
+            setSemaforoPesaje(SEM_ROJO);
+            t.estacion = EST_RETENIDO;
+            consola.println(F("Pesaje inicial (deposito) RECHAZADO. Confirmando (5s)..."));
+            iniciarConfirmacionPesaje(turnoEnPesaje, false, false);
+          }
+        }
+        else { // OP_RETIRO
+          // El camion entra vacio: el peso bruto debe corresponder a
+          // su tara registrada (con la misma tolerancia del manifiesto).
+          if (abs(pesoTotal - cam.tara) <= m.tolerancia) {
+            setSemaforoPesaje(SEM_VERDE);
+            t.pesajeInicial = pesoTotal;
+            t.estacion = EST_ESPERANDO_TRANSFERENCIA;
+            consola.println(F("Pesaje inicial (retiro, camion vacio) OK. Confirmando (5s)..."));
+            iniciarConfirmacionPesaje(turnoEnPesaje, false, true);
+          } else {
+            setSemaforoPesaje(SEM_ROJO);
+            t.estacion = EST_RETENIDO;
+            consola.println(F("Pesaje inicial (retiro, camion vacio) RECHAZADO. Confirmando (5s)..."));
+            iniciarConfirmacionPesaje(turnoEnPesaje, false, false);
+          }
+        }
+      }
+      else if (t.estacion == EST_EN_PESAJE_FINAL) {
+        // Solo se llega aqui cuando la grua ya confirmo su movimiento
+        // (actualizarCicloAutomaticoGrua() es quien pasa el turno a
+        // EST_ESPERANDO_PESAJE_FINAL, y de ahi asignarPesajeSiLibre()
+        // lo sube a EST_EN_PESAJE_FINAL) -- ya no hace falta revisar
+        // ninguna bandera aparte, el propio estado lo garantiza.
+        if (m.tipo == OP_DEPOSITO) {
+          // Debe quedar igual a la tara (camion vacio otra vez, ya sin
+          // el contenedor que la grua acaba de retirar).
+          if (abs(pesoTotal - cam.tara) <= m.tolerancia) {
+            setSemaforoPesaje(SEM_VERDE);
+            t.pesajeFinal = pesoTotal;
+            t.estacion = EST_ESPERANDO_SALIDA;
+            consola.println(F("Pesaje final (deposito) OK. Confirmando (5s)..."));
+            iniciarConfirmacionPesaje(turnoEnPesaje, true, true);
+          } else {
+            setSemaforoPesaje(SEM_ROJO);
+            t.estacion = EST_RETENIDO;
+            consola.println(F("Pesaje final (deposito) RECHAZADO. Confirmando (5s)..."));
+            iniciarConfirmacionPesaje(turnoEnPesaje, true, false);
+          }
+        }
+        else { // OP_RETIRO
+          float pesoContenedor = pesoTotal - cam.tara;
+          if (abs(pesoContenedor - m.pesoDeclarado) <= m.tolerancia) {
+            setSemaforoPesaje(SEM_VERDE);
+            t.pesajeFinal = pesoTotal;
+            t.estacion = EST_ESPERANDO_SALIDA;
+            consola.println(F("Pesaje final (retiro) OK. Confirmando (5s)..."));
+            iniciarConfirmacionPesaje(turnoEnPesaje, true, true);
+          } else {
+            setSemaforoPesaje(SEM_ROJO);
+            t.estacion = EST_RETENIDO;
+            consola.println(F("Pesaje final (retiro) RECHAZADO. Confirmando (5s)..."));
+            iniciarConfirmacionPesaje(turnoEnPesaje, true, false);
+          }
+        }
+      }
+      else {
+        // Cualquier otro estado (ESPERANDO_TRANSFERENCIA, EN_TRANSFERENCIA,
+        // ESPERANDO_SALIDA, RETENIDO): este turno no deberia estar en la
+        // bascula ahora mismo -- no evalua nada.
+        setSemaforoPesaje(SEM_APAGADO);
+      }
+    }
+  }
+}
+
+// Recurso compartido: la bascula solo puede pesar un camion a la vez.
+// Revisa los turnos en orden (0,1,2) y le asigna la bascula al primero
+// que la este esperando -- orden determinista, como pide el enunciado
+// para la cola de trabajos en general.
+void asignarPesajeSiLibre() {
+  if (turnoEnPesaje != SIN_TURNO) return;
+
+  for (byte i = 0; i < NUM_CAMIONES; i++) {
+    if (turnos[i].idManifiesto == SIN_TURNO) continue;
+
+    if (turnos[i].estacion == EST_ESPERANDO_PESAJE_INICIAL) {
+      turnoEnPesaje = i;
+      turnos[i].estacion = EST_EN_PESAJE_INICIAL;
+      return;
+    }
+    if (turnos[i].estacion == EST_ESPERANDO_PESAJE_FINAL) {
+      turnoEnPesaje = i;
+      turnos[i].estacion = EST_EN_PESAJE_FINAL;
+      return;
+    }
+  }
+}
+
+// Se llama en cada vuelta de loop(). Avanza la maquina de estados del
+// pesaje sin detener nunca el ciclo principal.
+void actualizarPesaje() {
+  unsigned long ahora = millis();
+
+  switch (estadoPesaje) {
+
+    case PESAJE_ESTABILIZANDO:
+      if (ahora - tReferenciaPesaje >= TIEMPO_ESTABILIZACION) {
+        tReferenciaPesaje = ahora;
+        estadoPesaje = PESAJE_TARA_ESPERA;
+      }
+      break;
+
+    case PESAJE_TARA_ESPERA:
+      if (ahora - tReferenciaPesaje >= TIEMPO_ESPERA_TARA) {
+        consola.println(F("Tarando A y B... no toques la plataforma"));
+        sumaTaraA = 0;
+        sumaTaraB = 0;
+        muestrasTaraObtenidas = 0;
+        estadoPesaje = PESAJE_TARA_MUESTREANDO;
+      }
+      break;
+
+    case PESAJE_TARA_MUESTREANDO: {
+      long a, b;
+      if (leerParSincronizado(a, b)) {
+        sumaTaraA += a;
+        sumaTaraB += b;
+        muestrasTaraObtenidas++;
+
+        if (muestrasTaraObtenidas >= N_TARA) {
+          offsetA = sumaTaraA / N_TARA;
+          offsetB = sumaTaraB / N_TARA;
+          consola.print(F("offsetA=")); consola.print(offsetA);
+          consola.print(F("  offsetB=")); consola.println(offsetB);
+
+          // sensorC.tare() bloquea brevemente por diseno de la libreria
+          // HX711 (bogde): espera a que DOUT este listo. En este punto
+          // el sensor ya lleva 15s+ energizado, asi que la espera real
+          // es de milisegundos, no un delay() nuestro.
+          if (sensorC.is_ready()) {
+            sensorC.tare(5);
+          }
+
+          consola.println(F("Pesaje listo."));
+          consola.println(F("(Envia 't' por el Monitor Serie para volver a tarar A/B en cualquier momento, sin peso encima)"));
+          consola.println();
+
+          estadoPesaje = PESAJE_LISTO;
+        }
+      }
+      break;
+    }
+
+    case PESAJE_LISTO:
+      leerYReportarPesaje();
+      break;
+  }
+}
+
+// Revisa el puerto serie SOLO por el comando de re-tara ('t'/'T').
+// Usa peek() en vez de read() para no "robarse" bytes que le
+// correspondan a los comandos de la grua ('a'-'h'), que se leen
+// mas abajo en actualizarComandosGrua().
+// Re-tarar ya no llama a una funcion bloqueante: solo reinicia el
+// cronometro y regresa la maquina de estados a PESAJE_TARA_ESPERA.
+void revisarComandoPesaje() {
+  if (Serial.available()) {
+    char c = Serial.peek();
+    if (c == 't' || c == 'T') {
+      Serial.read(); // ahora si se consume, era para nosotros
+      consola.println(F("Re-tara de A/B solicitada..."));
+      setSemaforoPesaje(SEM_AZUL); // en espera mientras vuelve a tarar
+      tReferenciaPesaje = millis();
+      estadoPesaje = PESAJE_TARA_ESPERA;
+    }
+  }
+}
+
+// SOLO PARA PRUEBAS (no es parte del enunciado): cierra a mano el turno
+// activo sin pasar por la salida real, que todavia no existe (Fase 7).
+// Deja el manifiesto otra vez PENDIENTE y libera la posicion de patio
+// reservada, para poder repetir pruebas (ej. peso fuera de tolerancia)
+// sin tener que reiniciar el Arduino entero. Quitar/reemplazar cuando
+// se implemente el flujo real de salida.
+void revisarComandoResetTurno() {
+  if (Serial.available()) {
+    char c = Serial.peek();
+    if (c == 'x' || c == 'X') {
+      Serial.read();
+
+      bool huboAlgo = false;
+
+      for (byte i = 0; i < NUM_CAMIONES; i++) {
+        if (turnos[i].idManifiesto == SIN_TURNO) continue;
+        huboAlgo = true;
+
+        Manifiesto &m = manifiestos[turnos[i].idManifiesto];
+        m.estado = MANIFIESTO_PENDIENTE;
+
+        if (turnos[i].posicionPatio != SIN_POSICION && m.tipo == OP_DEPOSITO) {
+          byte idx = turnos[i].posicionPatio;
+          // Si ya tenia un contenedor antes de la reserva (nivel 1),
+          // vuelve a OCUPADA; si estaba vacia, vuelve a LIBRE.
+          patio[idx].estado = (patio[idx].nivelActual == 0) ? POS_LIBRE : POS_OCUPADA;
+        }
+
+        consola.print(F("[PRUEBA] Turno del camion #"));
+        consola.print(i);
+        consola.print(F(" cerrado a mano. Manifiesto #"));
+        consola.print(m.id);
+        consola.println(F(" vuelve a PENDIENTE."));
+
+        turnos[i].idManifiesto = SIN_TURNO;
+        turnos[i].estacion = EST_ESPERANDO_PESAJE_INICIAL;
+        turnos[i].posicionPatio = SIN_POSICION;
+      }
+
+      if (!huboAlgo) {
+        consola.println(F("[PRUEBA] No habia ningun turno activo que cerrar."));
+      }
+
+      turnoEnPesaje = SIN_TURNO;
+      pesajeConfirmando = false;
+      confirmacionIdxCamion = SIN_TURNO;
+      colaGruaInicio = 0;
+      colaGruaFin = 0;
+      colaGruaCantidad = 0;
+      cicloAutomatico = CICLO_INACTIVO;
+      cicloIdxCamion = SIN_TURNO;
+      setSemaforoPesaje(SEM_AZUL);
+    }
+  }
+}
+
+
+// ==================================================================
+//  ESTACION 3: GRUA (servo traslacion + izaje + iman)
+// ==================================================================
+
+Servo servoGrua;
+
+const int pinServo = 9;
+const int pinSubida = 22;
+const int pinBajada = 23;
+const int pinIman = 24;
+
+const int posicion1 = 10;
+const int posicion2 = 60;
+const int posicion3 = 120;
+const int posicionH = 180;
+
+// Como la altura de la pila se decide por el inventario (no por sensor,
+// segun lo acordado), la bajada necesita dos profundidades distintas:
+const unsigned long TIEMPO_BAJADA_NIVEL0 = 3600; // posicion vacia -- ya validado (es el valor que ya usaba 'd'/'r')
+const unsigned long TIEMPO_BAJADA_NIVEL1 = 2700; // estimado (~1s menos que nivel 0) -- ajustar si al probar no calza exacto
+
+int posicionActual = 180;
+int posicionDestino = 180;
+
+bool estadoIman = false;
+bool servoMoviendo = false;
+bool sistemaOcupado = false;
+bool movimientoHome = false;
+bool accionRecoger = false;
+
+int direccionServo = 0;
+
+unsigned long ultimoPasoServo = 0;
+unsigned long intervaloServo = 0;
+
+unsigned long tiempoInicioVertical = 0;
+unsigned long tiempoBajadaActual = 0;
+unsigned long tiempoSubidaActual = 0;
+
+enum EstadoVertical {
+  VERTICAL_LIBRE,
+  VERTICAL_BAJANDO,
+  VERTICAL_ESPERANDO,
+  VERTICAL_SUBIENDO
+};
+
+EstadoVertical estadoVertical = VERTICAL_LIBRE;
+
+enum TipoMovimientoVertical {
+  MOVIMIENTO_NINGUNO,
+  MOVIMIENTO_D_HOME,
+  MOVIMIENTO_D_PUNTO,
+  MOVIMIENTO_R,
+  MOVIMIENTO_E
+};
+
+void iniciarMovimientoVertical(
+  TipoMovimientoVertical tipo,
+  unsigned long tiempoBajada,
+  unsigned long tiempoSubida
+);
+
+TipoMovimientoVertical tipoMovimientoVertical = MOVIMIENTO_NINGUNO;
+
+void iniciarMoverSuave(int destino, unsigned long tiempo) {
+  int pasos = abs(destino - posicionActual);
+
+  if (pasos == 0) {
+    servoMoviendo = false;
+    sistemaOcupado = false;
+
+    if (movimientoHome) {
+      consola.println("Llego a home!");
+      movimientoHome = false;
+    }
+
+    return;
+  }
+
+  posicionDestino = destino;
+  intervaloServo = tiempo / pasos;
+
+  if (intervaloServo == 0) {
+    intervaloServo = 1;
+  }
+
+  if (posicionActual < posicionDestino) {
+    direccionServo = 1;
+  } else {
+    direccionServo = -1;
+  }
+
+  servoMoviendo = true;
+  sistemaOcupado = true;
+  ultimoPasoServo = millis();
+}
+
+void actualizarServoGrua() {
+  if (!servoMoviendo) {
+    return;
+  }
+
+  unsigned long ahora = millis();
+
+  if (ahora - ultimoPasoServo >= intervaloServo) {
+    ultimoPasoServo = ahora;
+
+    posicionActual += direccionServo;
+    servoGrua.write(posicionActual);
+
+    if (posicionActual == posicionDestino) {
+      servoMoviendo = false;
+      sistemaOcupado = false;
+
+      if (movimientoHome) {
+        consola.println("Llego a home!");
+        movimientoHome = false;
+      }
+    }
+  }
+}
+
+void iniciarMovimientoVertical(
+  TipoMovimientoVertical tipo,
+  unsigned long tiempoBajada,
+  unsigned long tiempoSubida
+) {
+  if (sistemaOcupado) {
+    return;
+  }
+
+  tipoMovimientoVertical = tipo;
+  tiempoBajadaActual = tiempoBajada;
+  tiempoSubidaActual = tiempoSubida;
+
+  digitalWrite(pinSubida, LOW);
+  digitalWrite(pinBajada, HIGH);
+
+  tiempoInicioVertical = millis();
+  estadoVertical = VERTICAL_BAJANDO;
+  sistemaOcupado = true;
+}
+
+void actualizarMovimientoVertical() {
+  unsigned long ahora = millis();
+
+  if (estadoVertical == VERTICAL_BAJANDO) {
+    if (ahora - tiempoInicioVertical >= tiempoBajadaActual) {
+      digitalWrite(pinBajada, LOW);
+
+      if (
+        tipoMovimientoVertical == MOVIMIENTO_D_HOME ||
+        tipoMovimientoVertical == MOVIMIENTO_D_PUNTO
+      ) {
+        if (accionRecoger) {
+          digitalWrite(pinIman, HIGH);
+          estadoIman = true;
+
+          consola.println("Iman encendido");
+          consola.println("Carga recogida");
+        } else {
+          digitalWrite(pinIman, LOW);
+          estadoIman = false;
+
+          consola.println("Iman apagado");
+          consola.println("Carga entregada");
+        }
+      }
+
+      else if (tipoMovimientoVertical == MOVIMIENTO_R) {
+        digitalWrite(pinIman, HIGH);
+        estadoIman = true;
+
+        consola.println("Iman encendido");
+        consola.println("Carga recogida");
+      }
+
+      else if (tipoMovimientoVertical == MOVIMIENTO_E) {
+        digitalWrite(pinIman, LOW);
+        estadoIman = false;
+
+        consola.println("Iman apagado");
+        consola.println("Carga entregada");
+      }
+
+      tiempoInicioVertical = ahora;
+      estadoVertical = VERTICAL_ESPERANDO;
+    }
+  }
+
+  else if (estadoVertical == VERTICAL_ESPERANDO) {
+    if (ahora - tiempoInicioVertical >= 800) {
+      digitalWrite(pinSubida, HIGH);
+
+      tiempoInicioVertical = ahora;
+      estadoVertical = VERTICAL_SUBIENDO;
+    }
+  }
+
+  else if (estadoVertical == VERTICAL_SUBIENDO) {
+    if (ahora - tiempoInicioVertical >= tiempoSubidaActual) {
+      digitalWrite(pinSubida, LOW);
+
+      estadoVertical = VERTICAL_LIBRE;
+      tipoMovimientoVertical = MOVIMIENTO_NINGUNO;
+      sistemaOcupado = false;
+
+      if (estadoIman) {
+        consola.println("Movimiento terminado con carga");
+      } else {
+        consola.println("Movimiento terminado sin carga");
+      }
+    }
+  }
+}
+
+void actualizarComandosGrua() {
+  if (Serial.available() > 0) {
+    char comando = Serial.read();
+
+    if (comando == '\n' || comando == '\r') {
+      return;
+    }
+
+    if (sistemaOcupado || cicloAutomatico != CICLO_INACTIVO) {
+      return;
+    }
+
+    if (comando == 'a') {
+      consola.println("Moviendo a Punto 1");
+      iniciarMoverSuave(posicion1, 5000);
+    }
+
+    else if (comando == 'b') {
+      consola.println("Moviendo a Punto 2");
+      iniciarMoverSuave(posicion2, 4000);
+    }
+
+    else if (comando == 'c') {
+      consola.println("Moviendo a Punto 3");
+      iniciarMoverSuave(posicion3, 3000);
+    }
+
+    else if (comando == 'd') {
+      if (!estadoIman) {
+        accionRecoger = true;
+      } else {
+        accionRecoger = false;
+      }
+
+      if (posicionActual == posicionH) {
+        if (accionRecoger) {
+          consola.println("Bajando en HOME para recoger carga");
+        } else {
+          consola.println("Bajando en HOME para dejar carga en camion");
+        }
+
+        iniciarMovimientoVertical(
+          MOVIMIENTO_D_HOME,
+          3400,
+          3550
+        );
+      } else {
+        if (accionRecoger) {
+          consola.println("Bajando en punto para recoger carga");
+        } else {
+          consola.println("Bajando en punto para dejar carga");
+        }
+
+        iniciarMovimientoVertical(
+          MOVIMIENTO_D_PUNTO,
+          3600,
+          3600
+        );
+      }
+    }
+
+    else if (comando == 'i') {
+      if (estadoIman == false) {
+        consola.println("Encendiendo el iman");
+
+        digitalWrite(pinIman, HIGH);
+        estadoIman = true;
+      } else {
+        consola.println("Apagando el iman");
+
+        digitalWrite(pinIman, LOW);
+        estadoIman = false;
+      }
+    }
+
+    else if (comando == 'r') {
+      consola.println("Bajando, recogiendo carga y subiendo");
+
+      iniciarMovimientoVertical(
+        MOVIMIENTO_R,
+        3600,
+        3600
+      );
+    }
+
+    else if (comando == 'h') {
+      consola.println("Moviendo a HOME");
+
+      movimientoHome = true;
+
+      switch (posicionActual) {
+        case posicion1:
+          iniciarMoverSuave(posicionH, 5000);
+          break;
+
+        case posicion2:
+          iniciarMoverSuave(posicionH, 4000);
+          break;
+
+        case posicion3:
+          iniciarMoverSuave(posicionH, 3000);
+          break;
+
+        default:
+          consola.println("Llego a home!");
+          movimientoHome = false;
+          break;
+      }
+    }
+
+    else if (comando == 'e') {
+      consola.println("Bajando, dejando carga en camion y subiendo");
+
+      iniciarMovimientoVertical(
+        MOVIMIENTO_E,
+        3400,
+        3500
+      );
+    }
+  }
+}
+
+
+// ==================================================================
+//  FASE 4/5: CICLO AUTOMATICO DE LA GRUA CON COLA DE TRABAJOS
+// ==================================================================
+//
+// La grua atiende siempre al primero de colaGrua[] (orden de llegada,
+// deterministico). Solo empieza a moverse cuando, ademas, el sensor de
+// la zona de transferencia confirma que ESE camion ya esta colocado
+// fisicamente -- si el primero de la cola todavia no ha llegado, la
+// grua simplemente espera (no se salta al siguiente).
+//
+// Alcance de esta fase: si un retiro pide un contenedor que esta en el
+// fondo de una posicion con 2 niveles (bloqueado por el que esta
+// encima), la grua resuelve sola una remocion primero -- reubica el
+// contenedor de arriba en la primera posicion libre del patio, y
+// recien despues continua con el retiro original. El trabajo del
+// camion se queda al frente de la cola mientras tanto (no se le "cede
+// el paso" a nadie). Si no hay ninguna posicion libre para la
+// remocion, se espera (sin descartar el trabajo) hasta que se libere
+// alguna.
+
+#define TRIG_PROXIMIDAD_GRUA 25
+#define ECHO_PROXIMIDAD_GRUA 26
+
+const float UMBRAL_CERCA_PROXIMIDAD_GRUA = 7.0; // cm -- igual que en el sketch de prueba
+const int LECTURAS_NECESARIAS_PROXIMIDAD_GRUA = 3;
+const unsigned long INTERVALO_PROXIMIDAD_GRUA = 200; // ms
+const float DISTANCIA_MAXIMA_VALIDA = 400.0; // cm, limite real del HC-SR04
+
+int contadorProximidadGrua = 0;
+bool camionDetectadoProximidadGrua = false;
+unsigned long ultimaLecturaProximidadGrua = 0;
+unsigned long ultimoPrintProximidadGrua = 0;
+
+// Una sola lectura cruda del sensor (un pulso). Puede salir ruidosa
+// (rebotes en angulos raros, objetos chicos o blandos, o simplemente
+// nada en rango) -- por eso leerDistanciaProximidadGrua() de abajo NO
+// usa esta funcion sola, sino que promedia varias. Fusionado desde el
+// sketch de prueba aislado (Prueba_Grua_ProximidadGrua.ino), donde ya
+// se valido que esto filtra bien el ruido real de la maqueta.
+float leerUnaMuestraProximidadGrua() {
+  digitalWrite(TRIG_PROXIMIDAD_GRUA, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PROXIMIDAD_GRUA, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PROXIMIDAD_GRUA, LOW);
+
+  long duracion = pulseIn(ECHO_PROXIMIDAD_GRUA, HIGH, 30000);
+  if (duracion == 0) return -1; // sin eco, nada en rango (o cableado suelto)
+
+  float d = duracion * 0.034 / 2;
+  // El HC-SR04 no es confiable mas alla de ~400cm -- una lectura mayor
+  // a eso NO es "hay algo lejos", es ruido/rebote raro. Se descarta.
+  if (d > DISTANCIA_MAXIMA_VALIDA) return -1;
+  return d;
+}
+
+// Distancia "limpia": toma 3 muestras seguidas (con una pausa minima
+// entre cada una para no cruzar ecos de una con el trigger de la
+// siguiente) y promedia solo las que salieron validas. Una lectura
+// suelta rara ya no pasa, se necesita que varias coincidan.
+float leerDistanciaProximidadGrua() {
+  float suma = 0;
+  int validas = 0;
+
+  for (uint8_t i = 0; i < 3; i++) {
+    float d = leerUnaMuestraProximidadGrua();
+    if (d > 0) {
+      suma += d;
+      validas++;
+    }
+    if (i < 2) delay(10);
+  }
+
+  if (validas == 0) return -1; // ninguna de las 3 dio algo valido
+  return suma / validas;
+}
+
+// Igual que en la garita: exige varias lecturas seguidas cerca para
+// confirmar presencia real y evitar falsos positivos por ruido. No
+// se vigila que el camion se mueva DURANTE la transferencia (eso es
+// parte de la zona de transferencia formal, que quedo fuera de
+// alcance por ahora) -- solo se usa para disparar el ciclo.
+void actualizarProximidadGrua() {
+  if (millis() - ultimaLecturaProximidadGrua < INTERVALO_PROXIMIDAD_GRUA) return;
+  ultimaLecturaProximidadGrua = millis();
+
+  float distancia = leerDistanciaProximidadGrua();
+
+  // Impresion de calibracion, para confirmar que la grua reacciona al
+  // sensor correcto -- throttleada aparte (cada ~500ms), no en cada
+  // muestra.
+  if (millis() - ultimoPrintProximidadGrua >= 500) {
+    ultimoPrintProximidadGrua = millis();
+    if (distancia > 0) {
+      consola.print(F("[ProximidadGrua] distancia: "));
+      consola.print(distancia);
+      consola.println(F(" cm"));
+    } else {
+      consola.println(F("[ProximidadGrua] sin objeto en rango (o sin eco)"));
+    }
+  }
+
+  bool estabaDetectado = camionDetectadoProximidadGrua;
+
+  if (distancia > 0 && distancia <= UMBRAL_CERCA_PROXIMIDAD_GRUA) {
+    if (contadorProximidadGrua < LECTURAS_NECESARIAS_PROXIMIDAD_GRUA) contadorProximidadGrua++;
+    if (contadorProximidadGrua >= LECTURAS_NECESARIAS_PROXIMIDAD_GRUA) {
+      camionDetectadoProximidadGrua = true;
+    }
+  } else {
+    contadorProximidadGrua = 0;
+    camionDetectadoProximidadGrua = false;
+  }
+
+  // Aviso solo en el cambio de estado (flanco), para confirmar que la
+  // deteccion realmente dispara al ciclo de la grua.
+  if (camionDetectadoProximidadGrua && !estabaDetectado) {
+    consola.println(F(">>> [ProximidadGrua] DETECTADO (<7cm, 3 lecturas seguidas) <<<"));
+  } else if (!camionDetectadoProximidadGrua && estabaDetectado) {
+    consola.println(F(">>> [ProximidadGrua] Ya no se detecta nada cerca <<<"));
+  }
+}
+
+// Tiempo de traslacion horizontal HOME <-> posicion de patio -- mismos
+// valores ya calibrados a mano para los comandos manuales 'a'/'b'/'c'/'h'.
+unsigned long tiempoTraslacionPatio(byte idx) {
+  switch (idx) {
+    case 0: return 5000; // HOME <-> posicion1
+    case 1: return 4000; // HOME <-> posicion2
+    case 2: return 3000; // HOME <-> posicion3
+  }
+  return 3000;
+}
+
+int anguloPatio(byte idx) {
+  switch (idx) {
+    case 0: return posicion1;
+    case 1: return posicion2;
+    case 2: return posicion3;
+  }
+  return posicionH;
+}
+
+TipoOperacion cicloTipoOperacion;
+byte cicloIdxPosicion;
+
+// ---- Estado extra para el sub-ciclo de remocion (patio -> patio) ----
+// Una remocion no le pertenece a ningun camion (cicloIdxCamion queda en
+// SIN_TURNO mientras cicloEsRemocion es true) -- es un movimiento
+// interno para destrabar un retiro que la esta esperando. El trabajo
+// del camion en cuestion NO se desencola durante la remocion: se queda
+// al frente de colaGrua y se retoma solo, en la siguiente vuelta del
+// disparo, una vez que la remocion termina y el contenedor pedido ya
+// quedo accesible.
+bool cicloEsRemocion = false;
+byte cicloIdxPosicionDestinoRemocion = SIN_POSICION;
+byte cicloContenedorRemocion = SIN_CONTENEDOR;
+
+void actualizarCicloAutomaticoGrua() {
+  // ---- Disparo: toma el primero de la cola si la grua esta libre ----
+  if (cicloAutomatico == CICLO_INACTIVO && !sistemaOcupado) {
+    int idx = primeroEnColaGrua();
+
+    if (idx != -1 && turnos[idx].estacion == EST_ESPERANDO_TRANSFERENCIA) {
+      Manifiesto &m = manifiestos[turnos[idx].idManifiesto];
+      byte idxPos = turnos[idx].posicionPatio;
+
+      // Solo hace falta remocion si el contenedor pedido esta en el
+      // FONDO (nivel0) y hay otro encima (nivel1 ocupado). Si el
+      // pedido esta arriba, es accesible directo aunque nivelActual
+      // sea 2 -- ojo, la version anterior bloqueaba los dos casos por
+      // igual, lo cual rechazaba retiros validos sin necesidad.
+      bool necesitaRemocion = (m.tipo == OP_RETIRO)
+                                && patio[idxPos].nivelActual == 2
+                                && patio[idxPos].idContenedorNivel0 == m.idContenedor;
+
+      if (necesitaRemocion) {
+        int idxLibre = buscarPosicionLibreAccesible();
+
+        static byte ultimoManifiestoAvisado = SIN_TURNO;
+        if (idxLibre == -1) {
+          if (ultimoManifiestoAvisado != m.id) {
+            consola.print(F("[GRUA] Camion #"));
+            consola.print(idx);
+            consola.println(F(": el retiro necesita remocion, pero no hay posicion libre en el patio. Esperando..."));
+            ultimoManifiestoAvisado = m.id;
+          }
+          // se sigue esperando -- no se desencola nada este ciclo
+        } e  lse {
+          ultimoManifiestoAvisado = SIN_TURNO;
+
+          consola.print(F("[GRUA] Retiro del camion #"));
+          consola.print(idx);
+          consola.print(F(" necesita remocion: reubicando contenedor "));
+          consola.print(patio[idxPos].idContenedorNivel1);
+          consola.print(F(" de patio#"));
+          consola.print(idxPos);
+          consola.print(F(" a patio#"));
+          consola.println(idxLibre);
+
+          // El trabajo del camion NO se desencola -- se queda al
+          // frente, esperando a que esta remocion termine.
+          cicloEsRemocion = true;
+          cicloIdxCamion = SIN_TURNO;
+          cicloContenedorRemocion = patio[idxPos].idContenedorNivel1;
+          cicloIdxPosicion = idxPos;                          // origen de la remocion
+          cicloIdxPosicionDestinoRemocion = (byte) idxLibre;    // destino de la remocion
+          cicloAutomatico = CICLO_INICIAR_MOVER_ORIGEN;
+        }
+      }
+      else if (camionDetectadoProximidadGrua) {
+        consola.print(F("[AUTO] Camion #"));
+        consola.print(idx);
+        consola.println(F(" detectado en transferencia. Iniciando ciclo de grua..."));
+
+        desencolarGrua();
+        cicloEsRemocion = false;
+        cicloIdxCamion = idx;
+        cicloTipoOperacion = m.tipo;
+        cicloIdxPosicion = idxPos;
+        turnos[idx].estacion = EST_EN_TRANSFERENCIA;
+        cicloAutomatico = CICLO_INICIAR_MOVER_ORIGEN;
+      }
+      // si el camion todavia no llega fisicamente, se espera aqui sin
+      // desencolar -- no se le "cede el paso" a otro trabajo detras
+    }
+  }
+
+  // ---- Secuencia (no bloqueante: un paso por vuelta de loop) ----
+  switch (cicloAutomatico) {
+
+    case CICLO_INICIAR_MOVER_ORIGEN: {
+      if (cicloEsRemocion || cicloTipoOperacion == OP_RETIRO) {
+        iniciarMoverSuave(anguloPatio(cicloIdxPosicion), tiempoTraslacionPatio(cicloIdxPosicion));
+      } else {
+        iniciarMoverSuave(posicionH, tiempoTraslacionPatio(cicloIdxPosicion)); // normalmente ya esta aqui
+      }
+      cicloAutomatico = CICLO_ESPERANDO_MOVER_ORIGEN;
+      break;
+    }
+
+    case CICLO_ESPERANDO_MOVER_ORIGEN:
+      if (!sistemaOcupado) cicloAutomatico = CICLO_INICIAR_BAJAR_RECOGER;
+      break;
+
+    case CICLO_INICIAR_BAJAR_RECOGER: {
+      if (cicloEsRemocion) {
+        // recoge el de ARRIBA de una posicion con 2 -- descenso corto
+        iniciarMovimientoVertical(MOVIMIENTO_R, TIEMPO_BAJADA_NIVEL1, TIEMPO_BAJADA_NIVEL1);
+      } else if (cicloTipoOperacion == OP_DEPOSITO) {
+        // recoger el contenedor del camion, en HOME (mismos tiempos que 'd'/'r' en HOME)
+        iniciarMovimientoVertical(MOVIMIENTO_R, 3400, 3550);
+      } else {
+        // retiro (ya sin remocion pendiente en este punto): la
+        // profundidad depende de cuantos contenedores hay AHORA en esa
+        // posicion -- si el pedido estaba arriba, nivelActual puede
+        // seguir siendo 2 y el descenso es corto; si ya se hizo la
+        // remocion (o nunca hizo falta), es 1 y el descenso es completo.
+        unsigned long t = (patio[cicloIdxPosicion].nivelActual <= 1) ? TIEMPO_BAJADA_NIVEL0 : TIEMPO_BAJADA_NIVEL1;
+        iniciarMovimientoVertical(MOVIMIENTO_R, t, t);
+      }
+      cicloAutomatico = CICLO_ESPERANDO_BAJAR_RECOGER;
+      break;
+    }
+
+    case CICLO_ESPERANDO_BAJAR_RECOGER:
+      if (!sistemaOcupado) cicloAutomatico = CICLO_INICIAR_MOVER_DESTINO;
+      break;
+
+    case CICLO_INICIAR_MOVER_DESTINO: {
+      if (cicloEsRemocion) {
+        iniciarMoverSuave(anguloPatio(cicloIdxPosicionDestinoRemocion), tiempoTraslacionPatio(cicloIdxPosicionDestinoRemocion));
+      } else if (cicloTipoOperacion == OP_DEPOSITO) {
+        iniciarMoverSuave(anguloPatio(cicloIdxPosicion), tiempoTraslacionPatio(cicloIdxPosicion));
+      } else {
+        iniciarMoverSuave(posicionH, tiempoTraslacionPatio(cicloIdxPosicion));
+      }
+      cicloAutomatico = CICLO_ESPERANDO_MOVER_DESTINO;
+      break;
+    }
+
+    case CICLO_ESPERANDO_MOVER_DESTINO:
+      if (!sistemaOcupado) cicloAutomatico = CICLO_INICIAR_BAJAR_DEJAR;
+      break;
+
+    case CICLO_INICIAR_BAJAR_DEJAR: {
+      if (cicloEsRemocion) {
+        // dejar en el destino de la remocion -- profundidad segun
+        // cuantos contenedores hay YA ahi (antes de sumar este)
+        unsigned long t = (patio[cicloIdxPosicionDestinoRemocion].nivelActual == 0) ? TIEMPO_BAJADA_NIVEL0 : TIEMPO_BAJADA_NIVEL1;
+        iniciarMovimientoVertical(MOVIMIENTO_E, t, t);
+      } else if (cicloTipoOperacion == OP_DEPOSITO) {
+        // dejar en el patio -- profundidad segun cuantos contenedores
+        // hay YA ahi (antes de sumar este)
+        unsigned long t = (patio[cicloIdxPosicion].nivelActual == 0) ? TIEMPO_BAJADA_NIVEL0 : TIEMPO_BAJADA_NIVEL1;
+        iniciarMovimientoVertical(MOVIMIENTO_E, t, t);
+      } else {
+        // dejar en el camion, en HOME (mismos tiempos que 'e')
+        iniciarMovimientoVertical(MOVIMIENTO_E, 3400, 3500);
+      }
+      cicloAutomatico = CICLO_ESPERANDO_BAJAR_DEJAR;
+      break;
+    }
+
+    case CICLO_ESPERANDO_BAJAR_DEJAR:
+      if (!sistemaOcupado) {
+        if (cicloEsRemocion) {
+          // ---- Actualizar inventario de la remocion (patio -> patio) ----
+          byte origen = cicloIdxPosicion;
+          byte destino = cicloIdxPosicionDestinoRemocion;
+
+          patio[origen].idContenedorNivel1 = SIN_CONTENEDOR;
+          patio[origen].nivelActual--; // queda solo el de nivel0, el que el retiro esta esperando
+
+          byte nivelDestino = patio[destino].nivelActual;
+          if (nivelDestino == 0) patio[destino].idContenedorNivel0 = cicloContenedorRemocion;
+          else patio[destino].idContenedorNivel1 = cicloContenedorRemocion;
+          patio[destino].nivelActual++;
+          patio[destino].estado = POS_OCUPADA;
+
+          contenedores[cicloContenedorRemocion].ubicacion = destino + 1;
+          // sigue CONTENEDOR_EN_PATIO -- solo cambio de posicion, no de estado
+
+          consola.print(F("[GRUA] Remocion completada: contenedor "));
+          consola.print(cicloContenedorRemocion);
+          consola.print(F(" reubicado de patio#"));
+          consola.print(origen);
+          consola.print(F(" a patio#"));
+          consola.println(destino);
+          consola.println(F("[GRUA] El retiro que la necesitaba continua en la siguiente vuelta."));
+
+          cicloAutomatico = CICLO_INICIAR_MOVER_HOME;
+        } else {
+          // ---- Actualizar inventario, SOLO ahora que el movimiento fisico se confirmo ----
+          Turno &t = turnos[cicloIdxCamion];
+          Manifiesto &m = manifiestos[t.idManifiesto];
+
+          if (cicloTipoOperacion == OP_DEPOSITO) {
+            byte nivel = patio[cicloIdxPosicion].nivelActual; // nivel donde acaba de quedar
+            if (nivel == 0) patio[cicloIdxPosicion].idContenedorNivel0 = m.idContenedor;
+            else patio[cicloIdxPosicion].idContenedorNivel1 = m.idContenedor;
+            patio[cicloIdxPosicion].nivelActual++;
+            patio[cicloIdxPosicion].estado = POS_OCUPADA;
+
+            contenedores[m.idContenedor].ubicacion = cicloIdxPosicion + 1; // 1..N = posicion de patio
+            contenedores[m.idContenedor].estado = CONTENEDOR_EN_PATIO;
+          } else {
+            // retiro: puede salir del nivel1 (si se recogio directo,
+            // sin necesitar remocion) o del nivel0 (si ya se removio
+            // antes lo que estaba encima)
+            if (patio[cicloIdxPosicion].idContenedorNivel1 == m.idContenedor) {
+              patio[cicloIdxPosicion].idContenedorNivel1 = SIN_CONTENEDOR;
+            } else {
+              patio[cicloIdxPosicion].idContenedorNivel0 = SIN_CONTENEDOR;
+            }
+            patio[cicloIdxPosicion].nivelActual--;
+            patio[cicloIdxPosicion].estado = (patio[cicloIdxPosicion].nivelActual == 0) ? POS_LIBRE : POS_OCUPADA;
+
+            contenedores[m.idContenedor].ubicacion = 0; // 0 = en camion
+            contenedores[m.idContenedor].estado = CONTENEDOR_EN_CAMION;
+          }
+
+          consola.println(F("[AUTO] Movimiento confirmado. Inventario actualizado."));
+
+          // Destraba el pesaje final (Fase 2): recien ahora
+          // asignarPesajeSiLibre() puede subir este turno a EN_PESAJE_FINAL.
+          t.estacion = EST_ESPERANDO_PESAJE_FINAL;
+
+          cicloAutomatico = CICLO_INICIAR_MOVER_HOME;
+        }
+      }
+      break;
+
+    case CICLO_INICIAR_MOVER_HOME: {
+      byte idxReferencia = cicloEsRemocion ? cicloIdxPosicionDestinoRemocion : cicloIdxPosicion;
+      iniciarMoverSuave(posicionH, tiempoTraslacionPatio(idxReferencia));
+      cicloAutomatico = CICLO_ESPERANDO_MOVER_HOME;
+      break;
+    }
+
+    case CICLO_ESPERANDO_MOVER_HOME:
+      if (!sistemaOcupado) cicloAutomatico = CICLO_FINALIZAR;
+      break;
+
+    case CICLO_FINALIZAR:
+      if (cicloEsRemocion) {
+        consola.println(F("[GRUA] Remocion completada. Grua de regreso en HOME."));
+      } else {
+        consola.println(F("[AUTO] Ciclo de grua completado. Grua de regreso en HOME."));
+      }
+      cicloIdxCamion = SIN_TURNO;
+      cicloEsRemocion = false;
+      cicloAutomatico = CICLO_INACTIVO;
+      break;
+
+    default:
+      break;
+  }
+}
+
+
+// ==================================================================
+//  FASE 6: PARO DE EMERGENCIA (boton en pin 21, por interrupcion)
+// ==================================================================
+//
+// Boton normalmente abierto (NO) con pull-up interno: en reposo el pin
+// esta en HIGH, y al presionar cae a LOW -> se dispara en FALLING.
+//
+// Diseno "congelar y continuar" (lo que se acordo): al presionar, se
+// corta la alimentacion de los motores de inmediato (subida/bajada),
+// pero el iman NO se toca -- si estaba sosteniendo un contenedor debe
+// seguir sosteniendolo, cortarlo lo dejaria caer. El servo de
+// traslacion no necesita nada especial: al no seguir recibiendo pasos
+// nuevos, se queda quieto solo (asi funciona la libreria Servo).
+//
+// Al volver a presionar el boton (rearme), en vez de "seguir nomas" se
+// desplazan hacia adelante los cronometros propios de la grua (el del
+// servo y el del movimiento vertical) exactamente por lo que duro la
+// pausa -- asi la maquina de estados retoma la MISMA accion en la que
+// iba (terminar de bajar/subir/girar lo que le faltaba) como si el
+// tiempo no hubiera corrido durante el paro, y de ahi sigue el flujo
+// normal hasta HOME. Ningun otro cronometro del sistema (garita,
+// pesaje, deteccion de transferencia) se toca -- el paro es solo de la
+// grua, el resto del sistema sigue funcionando con normalidad.
+//
+// Mientras el paro esta activo, se dejan de llamar por completo
+// actualizarCicloAutomaticoGrua(), actualizarServoGrua(),
+// actualizarMovimientoVertical() y actualizarComandosGrua() (ver
+// loop()) -- asi ni se disparan trabajos nuevos de la cola ni se
+// aceptan comandos manuales de grua mientras esta detenida.
+
+#define PIN_PARO_EMERGENCIA 18 // antes 21 -- se libero para el SCL del I2C de la pantalla LCD
+
+// El trabajo pesado (activar o rearmar) se hace en loop(), no dentro
+// de la ISR -- la ISR solo debe ser rapida. Con debounce mas largo que
+// el de los sensores de proximidad porque esto es un boton fisico
+// (rebote mecanico), no una lectura de distancia.
+volatile bool paroSolicitado = false;
+volatile unsigned long ultimaInterrupcionParo = 0;
+const unsigned long DEBOUNCE_PARO_MS = 300;
+
+void isrParoEmergencia() {
+  unsigned long ahora = millis();
+  if (ahora - ultimaInterrupcionParo < DEBOUNCE_PARO_MS) return; // rebote, se ignora
+  ultimaInterrupcionParo = ahora;
+  paroSolicitado = true;
+}
+
+bool paroEmergenciaActivo = false;
+unsigned long momentoInicioPausa = 0;
+
+// Se llama en cada vuelta de loop(), antes que nada mas. Traduce la
+// senal cruda de la ISR (paroSolicitado) en activar/rearmar, alternando
+// segun el estado actual (primera pulsacion detiene, la siguiente rearma).
+void actualizarParoEmergencia() {
+  if (!paroSolicitado) return;
+  paroSolicitado = false;
+
+  if (!paroEmergenciaActivo) {
+    // ---- ACTIVAR ----
+    paroEmergenciaActivo = true;
+    momentoInicioPausa = millis();
+
+    digitalWrite(pinSubida, LOW);
+    digitalWrite(pinBajada, LOW);
+    // el iman se deja tal como estaba -- ver nota arriba
+
+    consola.println(F("[PARO DE EMERGENCIA] Activado. Grua detenida."));
+  } else {
+    // ---- REARMAR: desplazar los cronometros de la grua por la duracion de la pausa ----
+    unsigned long duracionPausa = millis() - momentoInicioPausa;
+
+    if (servoMoviendo) {
+      ultimoPasoServo += duracionPausa;
+    }
+    if (estadoVertical != VERTICAL_LIBRE) {
+      tiempoInicioVertical += duracionPausa;
+      // Restaurar el motor que estaba corriendo cuando se corto --
+      // VERTICAL_ESPERANDO no maneja ningun motor (es la pausa entre
+      // bajar y subir para el iman), asi que no hay nada que restaurar ahi.
+      if (estadoVertical == VERTICAL_BAJANDO) digitalWrite(pinBajada, HIGH);
+      else if (estadoVertical == VERTICAL_SUBIENDO) digitalWrite(pinSubida, HIGH);
+    }
+
+    paroEmergenciaActivo = false;
+    consola.println(F("[PARO DE EMERGENCIA] Rearmado. La grua continua donde iba."));
+  }
+}
+
+
+// ==================================================================
+//  SETUP / LOOP GENERAL
+// ==================================================================
+
+void setup() {
+  Serial.begin(9600);
+
+  Wire.begin();
+  lcd.init();
+  lcd.backlight();
+  mostrarEnLCD("PORTUS listo");
+
+  //  Semaforos 
+  pinMode(PIN_GARITA_ROJO, OUTPUT);
+  pinMode(PIN_GARITA_VERDE, OUTPUT);
+  pinMode(PIN_GARITA_AZUL, OUTPUT);
+  setSemaforoGarita(SEM_ROJO); // por defecto no se permite el ingreso
+
+  pinMode(PIN_PESAJE_ROJO, OUTPUT);
+  pinMode(PIN_PESAJE_VERDE, OUTPUT);
+  pinMode(PIN_PESAJE_AZUL, OUTPUT);
+  setSemaforoPesaje(SEM_AZUL); // por defecto en espera
+
+  //  Modelo de datos (Fase 1/5) 
+  for (byte i = 0; i < NUM_CAMIONES; i++) {
+    turnos[i].idManifiesto = SIN_TURNO;
+    turnos[i].estacion = EST_ESPERANDO_PESAJE_INICIAL;
+    turnos[i].pesajeInicial = 0;
+    turnos[i].pesajeFinal = 0;
+    turnos[i].posicionPatio = SIN_POSICION;
+  }
+  turnoEnPesaje = SIN_TURNO;
+  colaGruaInicio = 0;
+  colaGruaFin = 0;
+  colaGruaCantidad = 0;
+
+  //  Garita 
+  SPI.begin();
+  mfrc522.PCD_Init();
+
+  servoGarita.attach(SERVO_PIN);
+  servoGarita.write(ESTADO_CERRADO);
+
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+
+  //  Pesaje 
+  iniciarPesaje();
+
+  //  Grua 
+  pinMode(pinSubida, OUTPUT);
+  pinMode(pinBajada, OUTPUT);
+  pinMode(pinIman, OUTPUT);
+
+  digitalWrite(pinSubida, LOW);
+  digitalWrite(pinBajada, LOW);
+  digitalWrite(pinIman, LOW);
+
+  servoGrua.attach(pinServo);
+  servoGrua.write(posicionH);
+  posicionActual = posicionH;
+
+  //  Sensor de proximidad en zona de transferencia (Fase 4) 
+  pinMode(TRIG_PROXIMIDAD_GRUA, OUTPUT);
+  pinMode(ECHO_PROXIMIDAD_GRUA, INPUT);
+
+  //  Paro de emergencia (Fase 6) 
+  pinMode(PIN_PARO_EMERGENCIA, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(PIN_PARO_EMERGENCIA), isrParoEmergencia, FALLING);
+
+  consola.println("Sistema listo. Esperando camion...");
+  consola.println("Grua lista.");
+  consola.println("a = Punto 1");
+  consola.println("b = Punto 2");
+  consola.println("c = Punto 3");
+  consola.println("d = Cargar o descargar");
+  consola.println("i = Activar/Desactivar iman");
+  consola.println("h = Ir a posicion home");
+  consola.println("r = Recoger");
+  consola.println("e = Entregar en camion");
+  consola.println("x = [PRUEBA] cerrar turno activo a mano");
+  consola.println("Boton fisico en pin 18 = Paro de emergencia (presionar detiene, volver a presionar rearma)");
+}
+
+void loop() {
+  actualizarParoEmergencia();
+
+  actualizarGarita();
+
+  revisarComandoPesaje();
+  revisarComandoResetTurno();
+  asignarPesajeSiLibre();
+  actualizarPesaje();
+  actualizarConfirmacionPesaje();
+
+  actualizarProximidadGrua();
+
+  // Mientras el paro de emergencia esta activo, la grua se congela por
+  // completo: ni avanza su ciclo automatico, ni se mueve el servo o el
+  // izaje, ni se aceptan comandos manuales nuevos. El resto del sistema
+  // (garita, pesaje, deteccion de transferencia) sigue funcionando con
+  // normalidad -- el paro es solo de la grua.
+  if (!paroEmergenciaActivo) {
+    actualizarCicloAutomaticoGrua();
+    actualizarServoGrua();
+    actualizarMovimientoVertical();
+    actualizarComandosGrua();
+  }
+}

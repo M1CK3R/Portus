@@ -1,0 +1,17 @@
+# Dependencias del puente serial (A-8: versiones fijas)
+pyserial==3.5
+paho-mqtt==2.1.0
+
+# Dependencias de la web (SPECS §19.2: Flask; §7.3: hash bcrypt; waitress como
+# servidor WSGI de producción en el SBC, pues el de desarrollo de Flask no lo es)
+flask==3.1.3
+bcrypt==5.0.0
+waitress==3.0.2
+
+# Servicio de mensajería (SPECS §15.4: bot de Telegram asíncrono, v20 o superior)
+python-telegram-bot==22.8
+
+# Desarrollo y verificacion (CI)
+ruff==0.16.8
+mypy==2.3.1
+pytest==9.0.2

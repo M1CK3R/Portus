@@ -1,0 +1,21 @@
+[Unit]
+Description=PORTUS - núcleo web (autenticación, permisos e interfaz)
+Documentation=file:///opt/portus/docs/despliegue_web.md
+# Orden de arranque exigido (SPECS §19.2): mosquitto -> portus-web -> portus-bridge -> portus-msg
+After=network.target mosquitto.service
+Wants=mosquitto.service
+Before=portus-puente.service
+
+[Service]
+Type=simple
+User=portus
+Group=portus
+WorkingDirectory=/opt/portus
+ExecStart=/opt/portus/venv/bin/python -m web --config /opt/portus/config/portus.env
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

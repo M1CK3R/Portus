@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PORTUS · {% block titulo %}Terminal portuaria{% endblock %}</title>
+  <link rel="stylesheet" href="/estatico/estilos.css">
+</head>
+<body{% if usuario is defined and usuario %} data-rol="{{ usuario.rol.value }}"{% endif %}{% if mqtt is defined and mqtt %} data-mqtt-ws-puerto="{{ mqtt.ws_puerto }}" data-mqtt-usuario="{{ mqtt.usuario }}" data-mqtt-contrasena="{{ mqtt.contrasena }}"{% endif %}>
+  <header class="cabecera">
+    <span class="marca">PORTUS</span>
+    {% if usuario is defined and usuario %}
+    <div class="sesion">
+      <span class="sesion-nombre">{{ usuario.nombre_mostrado }}</span>
+      <span class="rol rol-{{ usuario.rol.value|lower }}">{{ usuario.rol.value }}</span>
+      <a class="boton-salir" href="/logout">Cerrar sesión</a>
+    </div>
+    {% endif %}
+  </header>
+  {% if pestanas is defined and pestanas %}
+  <nav class="pestanas" aria-label="Pestañas del rol">
+    {% for pestana in pestanas %}
+    <a class="pestana {{ 'activa' if activa is defined and activa and activa.slug == pestana.slug else '' }}"
+       href="/pestanas/{{ pestana.slug }}">{{ pestana.titulo }}</a>
+    {% endfor %}
+  </nav>
+  {% endif %}
+  <main class="contenido">
+    {% block contenido %}{% endblock %}
+  </main>
+</body>
+</html>

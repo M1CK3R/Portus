@@ -1,0 +1,25 @@
+<section id="retenciones">
+  <div class="filtros">
+    <label for="ret-filtro-causa">Causa</label>
+    <select id="ret-filtro-causa">
+      <option value="">Todas</option>
+      <option value="RT01">RT01 · Peso al ingreso</option>
+      <option value="RT02">RT02 · Peso a la salida</option>
+      <option value="RT03">RT03 · Canal rojo</option>
+      <option value="RT04">RT04 · Fuera de ventana</option>
+      <option value="RT05">RT05 · Documental</option>
+      <option value="RT06">RT06 · Manual operativa</option>
+    </select>
+    <label for="ret-filtro-estado">Estado</label>
+    <select id="ret-filtro-estado">
+      <option value="">Abiertas y resueltas</option>
+      <option value="abierta">Abiertas</option>
+      <option value="resuelta">Resueltas</option>
+    </select>
+  </div>
+  <div id="ret-error"></div>
+  <h2>Abiertas</h2>
+  <div id="ret-abiertas" class="lista-datos"></div>
+  <h2>Resueltas</h2>
+  <div id="ret-resueltas" class="lista-datos"></div>
+</section>

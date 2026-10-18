@@ -1,0 +1,109 @@
+{
+  "descripcion": "Constantes compartidas del protocolo serial PORTUS. Fuente de paridad firmware-puente (CODESTYLE P-2). El firmware de la Etapa 2 debe coincidir con este archivo y el puente lo verifica en pruebas.",
+  "prefijo_topicos": "portus",
+  "crc": {
+    "nombre": "CRC-16/CCITT-FALSE",
+    "polinomio": "0x1021",
+    "valor_inicial": "0xFFFF",
+    "reflexion_entrada": false,
+    "reflexion_salida": false,
+    "xor_salida": "0x0000",
+    "vector_estandar": { "datos": "123456789", "crc_hex": "29B1" }
+  },
+  "trama": {
+    "formato": "^SEQ|TIPO|CAMPOS#CRC\\n",
+    "caracteres_reservados": ["^", "|", "#", ",", "\n", "\r", "%"],
+    "escape": "%HH",
+    "longitud_maxima_bytes": 256,
+    "baudios_sugeridos": 115200
+  },
+  "tipos_trama": {
+    "eventos_controlador": ["GAR", "PES", "AGU", "TRF", "GRU", "PAT", "SAL", "ALM", "EST"],
+    "respuesta_controlador": ["RSP"],
+    "mensajes_servidor": ["CMD", "AUT", "JOB", "PING", "SYN"],
+    "nota": "El SPECS §4.2 dice 'código de 3 letras' pero define PING con 4; se aceptan 3 a 4 letras."
+  },
+  "autorizacion": {
+    "resultado": ["AUTORIZADO", "RECHAZADO"],
+    "causas_rechazo": [
+      "VEHICULO_DESCONOCIDO", "SIN_MANIFIESTO", "SIN_LEVANTE",
+      "LEVANTE_RETENIDO", "SIN_CITA", "PARQUEO_LLENO"
+    ],
+    "campos_autorizado": ["res", "turno", "veh", "tipo", "decl", "tol", "canal", "pos", "nivel"],
+    "campos_rechazado": ["res", "causa"],
+    "canal": ["verde", "rojo"]
+  },
+  "trabajo": {
+    "tipos": ["DEPOSITO", "RETIRO", "REMOCION"],
+    "campos": ["id", "tipo", "origen", "destino", "nivel", "cont", "turno"],
+    "marcador_vehiculo": "VEH"
+  },
+  "salida_valores": {
+    "nota": "Valores de SAL.res [DEC] (docs/protocolo_serial.md §3.1)",
+    "valores": ["DETECTADO", "CONFIRMADO"]
+  },
+  "retenciones": {
+    "causas": ["RT01", "RT02", "RT03", "RT04", "RT05", "RT06"],
+    "rol_facultado": {"RT01": "TERMINAL", "RT02": "TERMINAL", "RT03": "AUTORIDAD", "RT04": "TERMINAL", "RT05": "AUTORIDAD", "RT06": "TERMINAL"},
+    "resoluciones": ["ACLARAR", "CORREGIR", "RECHAZAR"]
+  },
+  "alarmas": {
+    "nota": "Catálogo SPECS §13.1: severidad y origen. El firmware envía ALM solo con los de origen controlador (AL02-AL08); web/modelos/alarma.py debe coincidir.",
+    "AL01": {"severidad": "CRITICA", "origen": "servidor"},
+    "AL02": {"severidad": "CRITICA", "origen": "controlador"},
+    "AL03": {"severidad": "CRITICA", "origen": "controlador"},
+    "AL04": {"severidad": "CRITICA", "origen": "controlador"},
+    "AL05": {"severidad": "ALTA", "origen": "controlador"},
+    "AL06": {"severidad": "ALTA", "origen": "controlador"},
+    "AL07": {"severidad": "ALTA", "origen": "controlador"},
+    "AL08": {"severidad": "ALTA", "origen": "controlador"},
+    "AL09": {"severidad": "MEDIA", "origen": "servidor"},
+    "AL10": {"severidad": "MEDIA", "origen": "servidor"},
+    "AL11": {"severidad": "MEDIA", "origen": "servidor"},
+    "AL12": {"severidad": "MEDIA", "origen": "servidor"},
+    "AL13": {"severidad": "BAJA", "origen": "servidor"},
+    "AL14": {"severidad": "BAJA", "origen": "servidor"}
+  },
+  "comandos": [
+    "AbrirTalanquera",
+    "CerrarTalanquera",
+    "AbrirPuertaSalida",
+    "AgujaRecta",
+    "AgujaParqueo",
+    "AgujaLiberar",
+    "GruaReferenciar",
+    "GruaSuspender",
+    "GruaReanudar",
+    "PosicionBloquear",
+    "PosicionLiberar",
+    "ModoMantenimiento",
+    "AlarmaSilenciar"
+  ],
+  "causas_rechazo_comando": [
+    "VEH_BAJO_TALANQUERA",
+    "VEH_BAJO_PUERTA",
+    "VEH_SOBRE_AGUJA",
+    "PARQUEO_VACIO",
+    "GRUA_CON_CARGA",
+    "GRUA_EN_TRABAJO",
+    "GRUA_EN_FALLA",
+    "POS_EN_TRABAJO",
+    "INCONSISTENCIA_PERSISTE",
+    "VEH_EN_TRANSFERENCIA",
+    "SIN_RESPUESTA"
+  ],
+  "estados_respuesta": ["ACK", "NAK"],
+  "severidades_alarma": ["CRITICA", "ALTA", "MEDIA", "BAJA"],
+  "topicos": {
+    "evt": ["garita", "pesaje", "aguja", "transferencia", "grua", "patio", "salida", "alarma", "estado"],
+    "cmd": ["solicitud", "respuesta"],
+    "srv": ["turno", "retencion", "alarma", "cita", "enlace"]
+  },
+  "qos": { "eventos": 1, "latido": 0, "comandos": 1 },
+  "tiempos": {
+    "periodo_latido_s": 5,
+    "periodos_sin_latido": 3,
+    "tiempo_limite_comando_s": 2,
+    "periodo_ping_s": 3
+  }
+}

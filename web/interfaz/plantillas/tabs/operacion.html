@@ -1,0 +1,92 @@
+<section id="operacion" class="sinoptico">
+  <p class="texto-ayuda">Actualización por suscripción MQTT sobre WebSocket (§14.1). Prohibido el polling.</p>
+
+  <div class="panel-sinoptico">
+    <div class="elem" data-stale>
+      <span class="etiqueta">Zona de espera</span>
+      <span id="op-espera">—</span>
+    </div>
+    <div class="elem" data-stale>
+      <span class="etiqueta">Garita</span>
+      <span id="op-garita">libre</span>
+    </div>
+    <div class="elem" data-stale>
+      <span class="etiqueta">Talanquera</span>
+      <span id="op-talanquera">cerrada</span>
+    </div>
+    <div class="elem" data-stale>
+      <span class="etiqueta">Plataforma de pesaje</span>
+      <span id="op-pesaje">libre</span>
+    </div>
+    <div class="elem" data-stale>
+      <span class="etiqueta">Aguja</span>
+      <span id="op-aguja">recta</span>
+    </div>
+    <div class="elem parqueo" data-stale>
+      <span class="etiqueta">Parqueo (3 plazas)</span>
+      <div id="op-plazas" class="plazas"></div>
+    </div>
+    <div class="elem" data-stale>
+      <span class="etiqueta">Transferencia</span>
+      <span id="op-transferencia">libre</span>
+    </div>
+    <div class="elem" data-stale>
+      <span class="etiqueta">Grúa</span>
+      <span id="op-grua-estado">—</span>
+      <span class="texto-ayuda">Posición: <span id="op-grua-posicion">—</span></span>
+      <span class="texto-ayuda">Trabajo: <span id="op-grua-trabajo">—</span></span>
+    </div>
+    <div class="elem" data-stale>
+      <span class="etiqueta">Cola de grúa</span>
+      <span id="op-cola">0 pendientes</span>
+    </div>
+    <div class="elem posiciones" data-stale>
+      <span class="etiqueta">Posiciones del patio</span>
+      <div id="op-posiciones" class="grid-posiciones"></div>
+    </div>
+    <div class="elem" data-stale>
+      <span class="etiqueta">Puerta de salida</span>
+      <span id="op-puerta">cerrada</span>
+      <span class="texto-ayuda">Vehículo: <span id="op-puerta-vehiculo">—</span></span>
+    </div>
+    <div class="elem">
+      <span class="etiqueta">Estado del enlace</span>
+      <span id="op-enlace-estado" class="indicador caido">desconectado</span>
+      <span class="texto-ayuda">Último estado: <span id="op-ultimo-ts">—</span></span>
+    </div>
+    <div class="elem" data-stale>
+      <span class="etiqueta">Modo del sistema</span>
+      <span id="op-modo">—</span>
+    </div>
+    <div class="elem" data-stale>
+      <span class="etiqueta">Turno actual</span>
+      <button type="button" id="op-turno-actual" class="enlace-turno" disabled>—</button>
+    </div>
+    <div class="elem" data-stale>
+      <span class="etiqueta">Alarmas activas</span>
+      <span id="op-alarmas" data-cuenta="0">0</span>
+    </div>
+  </div>
+
+  <div class="detalle-posicion" id="op-detalle-patio"></div>
+  <div class="detalle" id="op-detalle-turno"></div>
+
+  <h2>Comandos remotos (§6.3)</h2>
+  <div class="comandos">
+    <button class="boton" data-comando="AbrirTalanquera">Abrir talanquera</button>
+    <button class="boton" data-comando="AbrirPuertaSalida">Abrir puerta de salida</button>
+    <button class="boton" data-comando="ModoMantenimiento">Modo mantenimiento</button>
+    <button class="boton" data-comando="GruaSuspender">Suspender grúa</button>
+    <button class="boton" data-comando="GruaReanudar" disabled>Reanudar grúa</button>
+    <button class="boton" data-comando="GruaReferenciar" disabled>Referenciar grúa</button>
+  </div>
+  <h3>Comandos manuales (§6.3 [AMB])</h3>
+  <div class="comandos">
+    <button class="boton boton-chico" data-comando="CerrarTalanquera">Cerrar talanquera</button>
+    <button class="boton boton-chico" data-comando="AgujaRecta">Aguja recta</button>
+    <button class="boton boton-chico" data-comando="AgujaParqueo">Aguja parqueo</button>
+  </div>
+  <p class="texto-ayuda">«Liberar parqueo» está en cada plaza ocupada con retención resuelta.</p>
+  <h3>Respuestas del controlador (§6.2)</h3>
+  <ol id="op-cmd-respuestas" class="lista-respuestas"></ol>
+</section>

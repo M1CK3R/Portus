@@ -1,0 +1,99 @@
+# PORTUS Fase 2 — despliegue con Docker en la Raspberry Pi 4B (docs/docker.md).
+#
+#   cp config/portus.env.ejemplo config/portus.env   # y completarlo
+#   docker compose up -d --build
+#
+# Orden de arranque (§19.2): mosquitto → portus-web → portus-puente → portus-msg,
+# cada uno con reinicio automático y arranque al encender la Raspberry.
+#
+# Todos usan la red del host (network_mode: host): el mismo config/portus.env
+# sirve con o sin Docker (MQTT_HOST=127.0.0.1) y el firewall ufw sigue aplicando
+# a los puertos 8000 y 9001.
+
+x-portus: &portus
+  image: portus:latest
+  build: .
+  network_mode: host
+  restart: unless-stopped
+  # Mismo usuario que el dueño del repositorio en la Raspberry, para que pueda
+  # escribir db/portus.db (id -u / id -g; en Raspberry Pi OS suele ser 1000).
+  user: "${PORTUS_UID:-1000}:${PORTUS_GID:-1000}"
+  volumes:
+    - ./config:/app/config:ro
+    - ./db:/app/db
+  logging: &registro
+    driver: json-file
+    options:
+      max-size: "10m"   # la tarjeta SD no se llena con registros
+      max-file: "3"
+
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: portus-mosquitto
+    network_mode: host
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/portus/iniciar_mosquitto.sh"]
+    volumes:
+      - ./docker/mosquitto.conf:/portus/mosquitto.conf:ro
+      - ./docker/iniciar_mosquitto.sh:/portus/iniciar_mosquitto.sh:ro
+      - ./config/acl_portus:/portus/acl_portus:ro
+      - ./config/portus.env:/portus/portus.env:ro
+    tmpfs:
+      - /run/portus   # contraseñas generadas: solo en memoria
+    healthcheck:
+      # 075B = 1883 en hexadecimal, 0A = LISTEN: el broker ya acepta conexiones.
+      test: ["CMD-SHELL", "grep -qi ':075B 00000000:0000 0A' /proc/net/tcp"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    logging: *registro
+
+  portus-web:
+    <<: *portus
+    container_name: portus-web
+    command: ["python", "-m", "web", "--config", "config/portus.env"]
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    healthcheck:
+      # Aplica las migraciones al arrancar; listo cuando /login responde.
+      test:
+        - CMD-SHELL
+        - >-
+          p=$$(sed -n 's/^[[:space:]]*WEB_PUERTO[[:space:]]*=//p' config/portus.env | tail -n 1 | tr -d '\r ');
+          python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:$${p:-8000}/login', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 6
+
+  portus-puente:
+    <<: *portus
+    container_name: portus-puente
+    command: ["python", "-m", "puente", "--config", "config/portus.env"]
+    depends_on:
+      portus-web:
+        condition: service_healthy
+    volumes:
+      - ./config:/app/config:ro
+      - ./db:/app/db
+      # Se monta /dev completo (no solo el puerto) para que el Arduino pueda
+      # desconectarse y reconectarse sin recrear el contenedor; las reglas de
+      # abajo limitan el acceso a los puertos serie USB.
+      - /dev:/dev
+    device_cgroup_rules:
+      - "c 166:* rmw"   # /dev/ttyACM* (Mega original)
+      - "c 188:* rmw"   # /dev/ttyUSB* (clones con CH340/FTDI)
+    group_add:
+      - dialout
+
+  portus-msg:
+    <<: *portus
+    container_name: portus-msg
+    command: ["python", "-m", "mensajeria", "--config", "config/portus.env"]
+    depends_on:
+      portus-web:
+        condition: service_healthy
+      portus-puente:
+        condition: service_started

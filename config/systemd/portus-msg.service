@@ -1,0 +1,23 @@
+[Unit]
+Description=PORTUS - bot de Telegram del transportista (notificaciones y recordatorios)
+Documentation=file:///opt/portus/docs/mensajeria.md
+# Orden de arranque exigido (SPECS §19.2): mosquitto -> portus-web -> portus-bridge -> portus-msg
+# portus-web aplica las migraciones de la base; el bot la abre sin reaplicarlas.
+After=network-online.target mosquitto.service portus-web.service portus-puente.service
+Wants=network-online.target mosquitto.service
+
+[Service]
+Type=simple
+User=portus
+Group=portus
+WorkingDirectory=/opt/portus
+ExecStart=/opt/portus/venv/bin/python -m mensajeria --config /opt/portus/config/portus.env
+# Sin internet al arrancar, la Bot API no responde y el proceso termina:
+# systemd lo reintenta; los avisos esperan en la tabla notificacion (§15.4).
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
