@@ -1,6 +1,6 @@
-# PORTUS — Fase 2
+# PORTUS
 
-Plataforma de supervisión y control remoto de la maqueta de la terminal portuaria (Fase 1) sobre un **computador de placa única (SBC)**. Proyecto de *Arquitectura de Computadoras y Ensambladores 2* — USAC, Facultad de Ingeniería.
+Plataforma de supervisión y control remoto de la maqueta de la terminal portuaria (Fase 1) sobre un **computador de placa única (SBC)**.
 
 > **Estado:** Etapas 3 a 12 del ROADMAP implementadas en el servidor.
 >
@@ -47,14 +47,14 @@ Controlador (maqueta) ───────────────────�
      db/portus.db (SQLite WAL, compartida)
 ```
 
-Cada enlace usa un protocolo distinto (SPECS §2.3):
+Cada enlace usa un protocolo distinto:
 
 - **Serial** con el controlador.
 - **MQTT** entre servicios y hacia el sinóptico.
 - **HTTP** para la interfaz web.
 - **Telegram** (HTTPS saliente) solo para el transportista.
 
-Los servicios y su orden de arranque (§19.2) son `mosquitto` → `portus-web` → `portus-puente` → `portus-msg`:
+Los servicios y su orden de arranque son `mosquitto` → `portus-web` → `portus-puente` → `portus-msg`:
 
 | Servicio | Qué hace |
 |---|---|
@@ -90,7 +90,7 @@ portus/
 
 > **¿Con Docker?** Hay una alternativa que levanta los 4 servicios con `docker compose up -d --build`, sin venv, sin usuario `portus` y sin `mosquitto_passwd`: ver [`docs/docker.md`](docs/docker.md). Los pasos 3.3 (configuración), 3.5 (semillas) y 3.6 (bot) aplican igual; cambian los comandos.
 
-Procedimiento de §19.3. Está probado sobre Debian/Ubuntu y Raspberry Pi OS Bookworm (Python 3.11+). Los comandos asumen que se clona en **`/opt/portus`** y que los servicios corren con el usuario de sistema **`portus`**, que es lo que esperan las unidades de `config/systemd/`.
+Procedimiento del punto 19.3 de SPECS.md. Está probado sobre Debian/Ubuntu y Raspberry Pi OS Bookworm (Python 3.11+). Los comandos asumen que se clona en **`/opt/portus`** y que los servicios corren con el usuario de sistema **`portus`**, que es lo que esperan las unidades de `config/systemd/`.
 
 ### 3.1 Paquetes y reloj
 
@@ -164,7 +164,7 @@ sudo -u portus venv/bin/python -m herramientas.crear_usuarios_semilla --bd db/po
 sudo -u portus venv/bin/python -m herramientas.crear_datos_semilla --ruta-bd db/portus.db
 ```
 
-- El primero crea el esquema (migraciones 001–008) y los **7 usuarios mínimos** (§7.2): `terminal01`, `naviera01`, `naviera02`, `agente01`, `autoridad01`, `transportista01` y `transportista02`.
+- El primero crea el esquema (migraciones 001–008) y los **7 usuarios mínimos**: `terminal01`, `naviera01`, `naviera02`, `agente01`, `autoridad01`, `transportista01` y `transportista02`.
 - Imprime **una sola vez** las contraseñas generadas. Guárdelas para la entrega («credenciales de prueba»).
 - Para fijarlas en lugar de generarlas: `--contrasena-terminal …`, `--contrasena-naviera …`, etc., o las variables `PORTUS_SEMILLA_<ROL>`.
 - El segundo carga el catálogo de contenedores de la maqueta, los vehículos (con tara) y las posiciones del patio P1–P4. Las plazas de parqueo 1–3 nacen con el esquema.
@@ -188,7 +188,7 @@ sudo systemctl enable --now portus-web portus-puente portus-msg
 systemctl status portus-web portus-puente portus-msg --no-pager
 ```
 
-Las unidades usan `WorkingDirectory=/opt/portus`, `User=portus` y `Restart=always`, y respetan el orden de §19.2. `portus-web` aplica las migraciones y el bot abre la base sin reaplicarlas, por eso arranca después.
+Las unidades usan `WorkingDirectory=/opt/portus`, `User=portus` y `Restart=always`, y respetan el orden del punto 19.2 de SPECS.md. `portus-web` aplica las migraciones y el bot abre la base sin reaplicarlas, por eso arranca después.
 
 ### 3.8 Firewall (red local)
 
@@ -212,11 +212,11 @@ Ajuste el rango a la red del laboratorio. El puerto **1883 no se abre**: solo lo
 | `MQTT_USUARIO`, `MQTT_CONTRASENA` | puente y web | `portus-puente` y su clave |
 | `MQTT_WS_PUERTO`, `MQTT_TABLERO_USUARIO`, `MQTT_TABLERO_CONTRASENA` | web → navegador | `9001`, `portus-tablero` y su clave (solo lectura) |
 | `RUTA_BD` | todos | `db/portus.db` (relativa a `/opt/portus`) |
-| `TIEMPO_LIMITE_COMANDO_S`, `PERIODO_LATIDO_S`, `PERIODOS_SIN_LATIDO`, `PERIODO_PING_S` | puente | `2`, `5`, `3`, `3` (§4.5, §5.4) |
+| `TIEMPO_LIMITE_COMANDO_S`, `PERIODO_LATIDO_S`, `PERIODOS_SIN_LATIDO`, `PERIODO_PING_S` | puente | `2`, `5`, `3`, `3` |
 | `WEB_PUERTO` | web | `8000` |
 | `WEB_CLAVE_SECRETA` | web | **obligatoria en el SBC**: firma la cookie de sesión |
-| `WEB_EXPIRACION_INACTIVIDAD_MIN`, `WEB_VIDA_MAXIMA_SESION_H` | web | `30`, `12` (§7.3) |
-| `POLITICA_ASIGNACION` | web | `FASE1`: la línea base; queda registrada en cada reporte (§12.4) |
+| `WEB_EXPIRACION_INACTIVIDAD_MIN`, `WEB_VIDA_MAXIMA_SESION_H` | web | `30`, `12` |
+| `POLITICA_ASIGNACION` | web | `FASE1`: la línea base; queda registrada en cada reporte |
 | `TELEGRAM_BOT_TOKEN` | bot | token de @BotFather (sin él, `portus-msg` no arranca) |
 | `MSG_MQTT_USUARIO`, `MSG_MQTT_CONTRASENA` | bot | `portus-msg` y su clave |
 | `NOMBRE_TERMINAL` | bot | nombre que muestra `/inicio` |
@@ -226,7 +226,7 @@ Ajuste el rango a la red del laboratorio. El puerto **1883 no se abre**: solo lo
 
 ## 5. Verificación y acceso desde la red local
 
-Con los servicios arriba, compruebe (§19.3 pasos 6–8):
+Con los servicios arriba, compruebe (pasos 6–8 del punto 19.3 del SPECS.md):
 
 ```bash
 hostname -I                                         # IP del SBC en la red local
@@ -243,7 +243,7 @@ Desde otra computadora de la misma red:
 - **Sinóptico:** se actualiza en vivo por MQTT/WebSocket al puerto 9001 del mismo SBC. Si aparece «enlace perdido», revise el paso 3.4 y el firewall.
 - **Bot:** en el teléfono, abrir el bot y escribir `/inicio`. Luego TERMINAL genera el código en *Citas → Vinculación de transportistas* y el transportista escribe `/vincular CODIGO`.
 
-**Condición inicial para la demostración (§19.3):**
+**Condición inicial para la demostración:**
 
 - Controlador conectado y latiendo.
 - Grúa referenciada (`GruaReferenciar` desde la pestaña Operación).
@@ -260,7 +260,7 @@ Desde otra computadora de la misma red:
 | Reiniciar todo | `sudo systemctl restart mosquitto portus-web portus-puente portus-msg` |
 | Actualizar el código | `cd /opt/portus && sudo -u portus git pull && sudo -u portus venv/bin/pip install -r requirements.txt && sudo systemctl restart portus-web portus-puente portus-msg` |
 | Respaldo de la base | `sudo -u portus sqlite3 /opt/portus/db/portus.db ".backup '/var/lib/portus/portus-$(date +%F).db'"` |
-| Reporte de la corrida de evaluación | Pestaña **Reportes** → rango en hora de la terminal + etiqueta → exportar los dos CSV ([`docs/metricas.md`](docs/metricas.md) §5) |
+| Reporte de la corrida de evaluación | Pestaña **Reportes** → rango en hora de la terminal + etiqueta → exportar los dos CSV ([`docs/metricas.md`](docs/metricas.md) ) |
 
 Las migraciones nuevas se aplican solas al reiniciar `portus-web`: son idempotentes, así que no hace falta ningún paso manual.
 
@@ -270,14 +270,14 @@ Las migraciones nuevas se aplican solas al reiniciar `portus-web`: son idempoten
 
 | Síntoma | Causa probable / arreglo |
 |---|---|
-| `mosquitto` no arranca («Unable to open pwfile») | `passwd_mosquitto` o `acl_portus` no son del usuario `mosquitto` o la ruta no existe (§3.4). Ver el error real con `sudo /usr/sbin/mosquitto -c /etc/mosquitto/mosquitto.conf -v` |
+| `mosquitto` no arranca («Unable to open pwfile») | `passwd_mosquitto` o `acl_portus` no son del usuario `mosquitto` o la ruta no existe. Ver el error real con `sudo /usr/sbin/mosquitto -c /etc/mosquitto/mosquitto.conf -v` |
 | `portus-puente` reinicia en bucle | Puerto serie equivocado o sin permiso: revise `PUERTO_SERIE` y que `portus` esté en `dialout` (reinicie el servicio tras `usermod`) |
 | Alarma **AL01** al arrancar | El controlador no late: cable, baudios o firmware. Si el servidor estuvo apagado, es la AL01 retroactiva (A14) y se reconoce en *Alarmas* |
 | El sinóptico dice «enlace perdido» | El navegador no llega al 9001: firewall, o `MQTT_TABLERO_*` no coincide con `passwd_mosquitto` |
-| Login responde 403 | Usuario TRANSPORTISTA (sin web por diseño, §7.1) o rol sin permiso para esa acción (queda en la auditoría) |
+| Login responde 403 | Usuario TRANSPORTISTA (sin web por diseño) o rol sin permiso para esa acción (queda en la auditoría) |
 | `portus-msg` termina al arrancar | Falta `TELEGRAM_BOT_TOKEN`, el token es inválido o no hay internet. systemd lo reintenta cada 10 s |
 | El bot no manda avisos | Transportista sin vincular, o sin internet: los avisos quedan pendientes en `notificacion` y salen al volver |
-| El reporte sale vacío | Revise que el rango esté en **hora de la terminal** y que el reloj del SBC esté sincronizado (§3.1) |
+| El reporte sale vacío | Revise que el rango esté en **hora de la terminal** y que el reloj del SBC esté sincronizado |
 | Métrica 6 (fila de espera) en 0 | El firmware no llena `espera` en el latido `EST` (A15, [`docs/metricas.md`](docs/metricas.md)) |
 
 ---
@@ -309,9 +309,9 @@ python -m puente --config config/portus.env
   python -m herramientas.crear_operacion_demo --ruta-bd db/portus.db
   ```
   Crea el manifiesto y el levante, sin cita: la cita se pide con `/cita`.
-- **Solo en desarrollo, sin bot:** `--con-cita` escribe la cita directo en la base. **Prohibido en la evaluación** (barrera 🔴 4, [`docs/citas.md`](docs/citas.md) §6).
+- **Solo en desarrollo, sin bot:** `--con-cita` escribe la cita directo en la base. **Prohibido en la evaluación** (barrera 🔴 4, [`docs/citas.md`](docs/citas.md) ).
 
-Verificación antes de cada commit (CODESTYLE §16):
+Verificación antes de cada commit:
 
 ```bash
 ruff check . && ruff format --check .
